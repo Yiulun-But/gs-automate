@@ -113,11 +113,11 @@ function New-ConfigTemplate() {
     "dense": false,
 
     "templates": {
-      "automatic": "\"{colmap_bat}\" automatic_reconstructor --workspace_path \"{colmap_dir}\" --image_path \"{frames_dir}\" --dense {dense} --single_camera {single_camera}",
-      "feature_extractor": "\"{colmap_bat}\" feature_extractor --database_path \"{db}\" --image_path \"{frames_dir}\" --ImageReader.single_camera {single_camera} --SiftExtraction.num_threads {sift_threads}",
-      "matcher": "\"{colmap_bat}\" exhaustive_matcher --database_path \"{db}\"",
-      "mapper": "\"{colmap_bat}\" mapper --database_path \"{db}\" --image_path \"{frames_dir}\" --output_path \"{sparse_dir}\" --Mapper.num_threads {mapper_num_threads}",
-      "undistort": "\"{colmap_bat}\" image_undistorter --image_path \"{frames_dir}\" --input_path \"{sparse_dir}/0\" --output_path \"{undist_dir}\" --output_type COLMAP"
+      "automatic": "& \"{colmap_bat}\" automatic_reconstructor --workspace_path \"{colmap_dir}\" --image_path \"{frames_dir}\" --dense {dense} --single_camera {single_camera}",
+      "feature_extractor": "& \"{colmap_bat}\" feature_extractor --database_path \"{db}\" --image_path \"{frames_dir}\" --ImageReader.single_camera {single_camera} --SiftExtraction.num_threads {sift_threads}",
+      "matcher": "& \"{colmap_bat}\" exhaustive_matcher --database_path \"{db}\"",
+      "mapper": "& \"{colmap_bat}\" mapper --database_path \"{db}\" --image_path \"{frames_dir}\" --output_path \"{sparse_dir}\" --Mapper.num_threads {mapper_num_threads}",
+      "undistort": "& \"{colmap_bat}\" image_undistorter --image_path \"{frames_dir}\" --input_path \"{sparse_dir}/0\" --output_path \"{undist_dir}\" --output_type COLMAP"
     }
   },
 
@@ -145,15 +145,15 @@ function New-ConfigTemplate() {
 
   "nerfstudio": {
     "prepare": {
-      "command": "ns-process-data video --data \"{video}\" --output-dir \"{ns_data_dir}\" --fps {fps} --max-frame-processes 8 --keep-extracted-frames --auto-orient",
+      "command": "& ns-process-data video --data \"{video}\" --output-dir \"{ns_data_dir}\" --fps {fps} --max-frame-processes 8 --keep-extracted-frames --auto-orient",
       "args": { }
     },
     "train": {
-      "command": "ns-train gsplat --data \"{ns_data_dir}\" --output-dir \"{ns_out_dir}\"",
+      "command": "& ns-train gsplat --data \"{ns_data_dir}\" --output-dir \"{ns_out_dir}\"",
       "args": { "max-num-iterations": 30000 }
     },
     "export": {
-      "command": "ns-export gaussian-splat --load-config \"{ns_out_dir}/outputs/latest/config.yml\" --output \"{splat_path}\"",
+      "command": "& ns-export gaussian-splat --load-config \"{ns_out_dir}/outputs/latest/config.yml\" --output \"{splat_path}\"",
       "args": { "num-points": 1000000 }
     }
   }
