@@ -247,19 +247,21 @@ function Invoke-Process([string]$exe, [string[]]$argv, [string]$workdir, [hashta
   $p.StartInfo = $psi
 
   # Event handlers for async reading (PS 5.1 compatible)
+  $eventData = @{ OutBuilder = $outBuilder; ShowOutput = $ShowOutput }
   $outEvent = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -Action {
     if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
-      $null = $Event.MessageData.AppendLine($EventArgs.Data)
-      if ($ShowOutput) { Write-Host $EventArgs.Data }
+      $null = $Event.MessageData.OutBuilder.AppendLine($EventArgs.Data)
+      if ($Event.MessageData.ShowOutput) { Write-Host $EventArgs.Data }
     }
-  } -MessageData $outBuilder
+  } -MessageData $eventData
 
+  $eventData2 = @{ ErrBuilder = $errBuilder; ShowOutput = $ShowOutput }
   $errEvent = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -Action {
     if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
-      $null = $Event.MessageData.AppendLine($EventArgs.Data)
-      if ($ShowOutput) { Write-Host $EventArgs.Data -ForegroundColor Yellow }
+      $null = $Event.MessageData.ErrBuilder.AppendLine($EventArgs.Data)
+      if ($Event.MessageData.ShowOutput) { Write-Host $EventArgs.Data -ForegroundColor Yellow }
     }
-  } -MessageData $errBuilder
+  } -MessageData $eventData2
 
   $null = $p.Start()
   $p.BeginOutputReadLine()
@@ -308,19 +310,21 @@ function Invoke-External([string]$cmd, [string]$workdir, [hashtable]$env, [strin
   $p.StartInfo = $psi
 
   # Event handlers for async reading (PS 5.1 compatible)
+  $eventData = @{ OutBuilder = $outBuilder; ShowOutput = $ShowOutput }
   $outEvent = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -Action {
     if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
-      $null = $Event.MessageData.AppendLine($EventArgs.Data)
-      if ($ShowOutput) { Write-Host $EventArgs.Data }
+      $null = $Event.MessageData.OutBuilder.AppendLine($EventArgs.Data)
+      if ($Event.MessageData.ShowOutput) { Write-Host $EventArgs.Data }
     }
-  } -MessageData $outBuilder
+  } -MessageData $eventData
 
+  $eventData2 = @{ ErrBuilder = $errBuilder; ShowOutput = $ShowOutput }
   $errEvent = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -Action {
     if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
-      $null = $Event.MessageData.AppendLine($EventArgs.Data)
-      if ($ShowOutput) { Write-Host $EventArgs.Data -ForegroundColor Yellow }
+      $null = $Event.MessageData.ErrBuilder.AppendLine($EventArgs.Data)
+      if ($Event.MessageData.ShowOutput) { Write-Host $EventArgs.Data -ForegroundColor Yellow }
     }
-  } -MessageData $errBuilder
+  } -MessageData $eventData2
 
   $null = $p.Start()
   $p.BeginOutputReadLine()
