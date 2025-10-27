@@ -17,8 +17,8 @@ The tool orchestrates a 4-step process:
 - **ffmpeg** - For video frame extraction (must be on PATH or specify path in config)
 - **PowerShell 5.1+** (Windows PowerShell or PowerShell Core)
 - **Training Tool** (choose one):
-  - LichtFeld Studio commands on PATH (recommended), or
-  - Nerfstudio commands on PATH
+  - LichtFeld Studio, or
+  - Nerfstudio
 
 ### Optional
 - **CUDA** - Recommended for GPU acceleration (specify path in config if not on PATH)
