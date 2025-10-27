@@ -1,26 +1,26 @@
-<#
+<# 
 .SYNOPSIS
-  Orchestrate MP4 -> frames -> COLMAP -> train -> export Gaussian splat
-  Works with LichtFeld Studio (configurable CLI) or Nerfstudio (optional).
+  Orchestrate MP4 -> frames -> COLMAP -> (train) -> export Gaussian splat
+  Default pipeline is LichtFeld Studio; Nerfstudio supported as optional fallback.
 
 .PARAMETER Config
   Path to JSON config file (see template via -InitConfig).
 
 .PARAMETER InitConfig
-  Write a minimal+powerful config file template to this path and exit.
+  Write a config template to this path and exit.
 
 .PARAMETER DryRun
-  Print what would run, but don't execute.
+  Print what would run, but don’t execute.
 
 .PARAMETER Force
   Re-run steps even if outputs exist.
 
 .NOTES
   Assumes:
-    - CUDA 12.8 already installed and on PATH (or specify in config.cuda.home)
-    - COLMAP .bat path provided in config.colmap.bat
-    - ffmpeg available (or path provided in config.ffmpeg.path)
-    - LichtFeld Studio installed + accessible via the command templates you provide
+    - CUDA is installed (or specify in tools.cuda.home)
+    - COLMAP .bat path provided (tools.colmap.bat)
+    - ffmpeg available (tools.ffmpeg.path or on PATH)
+    - LichtFeld Studio CLI provided (tools.lichtfeld.exe)
 #>
 
 [CmdletBinding()]
@@ -36,8 +36,41 @@ Set-StrictMode -Version Latest
 
 function Write-Section($t) { Write-Host "`n=== $t ===" -ForegroundColor Cyan }
 function Write-Step($t)    { Write-Host "[*] $t" -ForegroundColor Yellow }
-function Write-Success($t) { Write-Host "[OK] $t" -ForegroundColor Green }
-function Write-Error($t)   { Write-Host "[ERR] $t" -ForegroundColor Red }
+function Write-OK($t)      { Write-Host "[OK] $t" -ForegroundColor Green }
+function Write-Err($t)     { Write-Host "[ERR] $t" -ForegroundColor Red }
+
+# ---------- JSON helpers (PS 5.1 compatible) ----------
+
+function ConvertTo-Hashtable($obj) {
+  if ($null -eq $obj) { return $null }
+  if ($obj -is [System.Collections.IDictionary]) {
+    $ht = @{}
+    foreach ($k in $obj.Keys) { $ht[$k] = ConvertTo-Hashtable $obj[$k] }
+    return $ht
+  }
+  if ($obj -is [pscustomobject]) {
+    $ht = @{}
+    $obj.PSObject.Properties | ForEach-Object { $ht[$_.Name] = ConvertTo-Hashtable $_.Value }
+    return $ht
+  }
+  if ($obj -is [System.Collections.IEnumerable] -and -not ($obj -is [string])) {
+    $list = @()
+    foreach ($item in $obj) { $list += ,(ConvertTo-Hashtable $item) }
+    return $list
+  }
+  return $obj
+}
+
+# Allow // and /* */ comments in JSON; always return hashtable
+function ConvertFrom-JsonFile($path) {
+  if (-not (Test-Path $path)) { throw "Config not found: $path" }
+  $raw = Get-Content -Raw -LiteralPath $path
+  $raw = [regex]::Replace($raw, '(?s)/\*.*?\*/|//.*(?=\r?$)', '')
+  $obj = $raw | ConvertFrom-Json
+  ConvertTo-Hashtable $obj
+}
+
+# ---------- Utilities ----------
 
 function New-ConfigTemplate() {
 @"
@@ -50,10 +83,10 @@ function New-ConfigTemplate() {
   },
 
   "tools": {
-    "ffmpeg": { "path": "ffmpeg" },
-    "colmap": { "bat":  "C:/Program Files/COLMAP/colmap.bat" },
-    "lichtfeld": { "exe": "C:/Program Files/LichtFeld Studio/LichtFeld.exe" },
-    "cuda":   { "home": null }
+    "ffmpeg":    { "path": "ffmpeg" },
+    "colmap":    { "bat":  "C:/Program Files/COLMAP/colmap.bat" },
+    "lichtfeld": { "exe":  "C:/Program Files/LichtFeld Studio/LichtFeld.exe" },
+    "cuda":      { "home": null }
   },
 
   "pipeline": "lichtfeld",  // or "nerfstudio"
@@ -62,7 +95,9 @@ function New-ConfigTemplate() {
     "fps": 2,
     "resize_long_edge": 1080,
     "image_ext": "png",
-    "skip_if_exists": true
+    "skip_if_exists": true,
+    // optional: if your source is rotated, set transpose to 1|2|3 (see ffmpeg transpose)
+    "transpose": null
   },
 
   "colmap": {
@@ -73,12 +108,8 @@ function New-ConfigTemplate() {
     "mapper_num_threads": 8,
     "dense": false,
 
-    // OPTIONAL: Override with your own command templates
     "templates": {
-      // Automatic reconstructor does everything (sparse only if dense=false)
       "automatic": "\"{colmap_bat}\" automatic_reconstructor --workspace_path \"{colmap_dir}\" --image_path \"{frames_dir}\" --dense {dense} --single_camera {single_camera}",
-
-      // Manual steps (feature -> match -> mapper -> undistort)
       "feature_extractor": "\"{colmap_bat}\" feature_extractor --database_path \"{db}\" --image_path \"{frames_dir}\" --ImageReader.single_camera {single_camera} --SiftExtraction.num_threads {sift_threads}",
       "matcher": "\"{colmap_bat}\" exhaustive_matcher --database_path \"{db}\"",
       "mapper": "\"{colmap_bat}\" mapper --database_path \"{db}\" --image_path \"{frames_dir}\" --output_path \"{sparse_dir}\" --Mapper.num_threads {mapper_num_threads}",
@@ -86,8 +117,6 @@ function New-ConfigTemplate() {
     }
   },
 
-  // ---- LICHTFELD STUDIO ----
-  // Specify LichtFeld.exe path in tools.lichtfeld.exe
   "lichtfeld": {
     "train": {
       "work_dir_name": "lf_train",
@@ -110,8 +139,6 @@ function New-ConfigTemplate() {
     }
   },
 
-  // ---- NERFSTUDIO (optional fallback) ----
-  // Nerfstudio commands should be on PATH
   "nerfstudio": {
     "prepare": {
       "command": "ns-process-data video --data \"{video}\" --output-dir \"{ns_data_dir}\" --fps {fps} --max-frame-processes 8 --keep-extracted-frames --auto-orient",
@@ -133,28 +160,19 @@ function New-ConfigTemplate() {
 if ($InitConfig) {
   if (Test-Path $InitConfig) { throw "File already exists: $InitConfig" }
   New-ConfigTemplate | Set-Content -Encoding UTF8 -NoNewline -LiteralPath $InitConfig
-  Write-Success "Wrote template: $InitConfig"
+  Write-OK "Wrote template: $InitConfig"
   return
 }
 
 if (-not $Config) { throw "Provide -Config <path to json> or -InitConfig to generate one." }
-if (-not (Test-Path $Config)) { throw "Config not found: $Config" }
-
-# --- Helpers ---
-function ConvertFrom-JsonFile($path) { Get-Content -Raw -LiteralPath $path | ConvertFrom-Json -AsHashtable }
 
 function Initialize-Directory($p) {
   if (-not (Test-Path $p)) { New-Item -ItemType Directory -Force -Path $p | Out-Null }
   (Resolve-Path $p).Path
 }
 
-function Join-PathSafe([string]$a,[string]$b) {
-  if ($a -and $b) { return (Join-Path $a $b) }
-  elseif ($a) { return $a }
-  else { return $b }
-}
-
 function ConvertTo-BinaryInt($b) { if ($b -is [bool]) { if ($b) {1} else {0} } else { $b } }
+function Copy-Hashtable([hashtable]$h) { $n=@{}; if ($h){ foreach ($k in $h.Keys){ $n[$k]=$h[$k] } }; return $n }
 
 function ConvertTo-ArgString([hashtable]$kv) {
   if (-not $kv) { return "" }
@@ -162,17 +180,16 @@ function ConvertTo-ArgString([hashtable]$kv) {
   foreach ($k in $kv.Keys) {
     $v = $kv[$k]
     if ($v -is [bool]) {
-      if ($v) { $parts += "--$k" }  # boolean flags appear if true
+      if ($v) { $parts += "--$k" }
     } elseif ($null -eq $v -or $v -eq "") {
       # skip
     } else {
       $vstr = "$v"
-      # quote if needed
       if ($vstr -match '\s' -or $vstr -match '[\\"]') { $vstr = '"' + $vstr.Replace('"','\"') + '"' }
       $parts += "--$k $vstr"
     }
   }
-  return ($parts -join ' ')
+  ($parts -join ' ')
 }
 
 function Merge-ArgumentsFromFile([hashtable]$base,[string]$file) {
@@ -180,32 +197,43 @@ function Merge-ArgumentsFromFile([hashtable]$base,[string]$file) {
   if (-not (Test-Path $file)) { throw "args_from_file not found: $file" }
   $extra = ConvertFrom-JsonFile $file
   foreach ($k in $extra.Keys) { $base[$k] = $extra[$k] }
-  return $base
+  $base
 }
 
 function Expand-TemplateString([string]$template,[hashtable]$ctx) {
   $expanded = $template
   foreach ($key in $ctx.Keys) {
-    $v = "$($ctx[$key])"
-    $expanded = $expanded -replace "\{$key\}", [Regex]::Escape($v) -replace '\\E','' -replace '\\Q',''
+    $val = [string]$ctx[$key]
+    $expanded = $expanded.Replace("{$key}", $val)
   }
-  return $expanded
+  $expanded
 }
 
-function Invoke-Command([string]$cmd, [string]$workdir, [hashtable]$env, [string]$logFile) {
-  Write-Step $cmd
+# --- Process invocation helpers ---
+
+function Quote-Arg([string]$s) {
+  if ($s -match '[\s"]') { return '"' + $s.Replace('"','\"') + '"' }
+  return $s
+}
+
+function Invoke-Process([string]$exe, [string[]]$argv, [string]$workdir, [hashtable]$env, [string]$logFile) {
+  $exePrintable = $exe
+  if ($exePrintable -match '[\s"]') { $exePrintable = '"' + $exePrintable + '"' }
+  $argStr = ($argv | ForEach-Object { Quote-Arg $_ }) -join ' '
+  Write-Step ("{0} {1}" -f $exePrintable, $argStr)
+
   if ($DryRun) { return 0 }
-  if ($logFile) {
-    ">>> $cmd`n" | Add-Content -Encoding UTF8 -LiteralPath $logFile
-  }
+
+  if ($logFile) { ">>> $exe $argStr`n" | Add-Content -Encoding UTF8 -LiteralPath $logFile }
+
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName  = "powershell.exe"
-  $psi.Arguments = "-NoProfile -NonInteractive -Command $cmd"
+  $psi.FileName  = $exe
+  $psi.Arguments = $argStr
   $psi.WorkingDirectory = $workdir
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError  = $true
   $psi.UseShellExecute = $false
-  foreach ($k in $env.Keys) { $psi.Environment[$k] = "$($env[$k])" }
+  if ($env) { foreach ($k in $env.Keys) { $psi.Environment[$k] = "$($env[$k])" } }
 
   $p = New-Object System.Diagnostics.Process
   $p.StartInfo = $psi
@@ -213,90 +241,149 @@ function Invoke-Command([string]$cmd, [string]$workdir, [hashtable]$env, [string
   $stdout = $p.StandardOutput.ReadToEnd()
   $stderr = $p.StandardError.ReadToEnd()
   $p.WaitForExit()
-
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
-    if ($stderr) {
-      "`n[stderr]`n$stderr`n" | Add-Content -Encoding UTF8 -LiteralPath $logFile
-    }
+    if ($stderr) { "`n[stderr]`n$stderr`n" | Add-Content -Encoding UTF8 -LiteralPath $logFile }
   }
-
   if ($p.ExitCode -ne 0) {
     Write-Error "ExitCode=$($p.ExitCode)"
-    throw "Command failed: $cmd`n$stderr"
+    throw "Invoke-Process failed."
   }
   return $p.ExitCode
 }
 
-# --- Load config & derive paths ---
-$config = ConvertFrom-JsonFile $Config
+function Invoke-External([string]$cmd, [string]$workdir, [hashtable]$env, [string]$logFile) {
+  Write-Step $cmd
+  if ($DryRun) { return 0 }
+  if ($logFile) { ">>> $cmd`n" | Add-Content -Encoding UTF8 -LiteralPath $logFile }
 
-$projName = $config.project.name
-$workDir  = Initialize-Directory $config.project.work_dir
-$video    = $config.project.video
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName  = "cmd.exe"
+  $psi.Arguments = '/c "' + $cmd + '"'
+  $psi.WorkingDirectory = $workdir
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError  = $true
+  $psi.UseShellExecute = $false
+  if ($env) { foreach ($k in $env.Keys) { $psi.Environment[$k] = "$($env[$k])" } }
+
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
+  $null = $p.Start()
+  $stdout = $p.StandardOutput.ReadToEnd()
+  $stderr = $p.StandardError.ReadToEnd()
+  $p.WaitForExit()
+  if ($logFile) {
+    $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
+    if ($stderr) { "`n[stderr]`n$stderr`n" | Add-Content -Encoding UTF8 -LiteralPath $logFile }
+  }
+  if ($p.ExitCode -ne 0) {
+    Write-Error "ExitCode=$($p.ExitCode)"
+    throw "Invoke-External failed."
+  }
+  return $p.ExitCode
+}
+
+# ---------- Load & validate config ----------
+
+$cfg = ConvertFrom-JsonFile $Config
+
+Write-Section "Config Parse Diagnostics"
+if ($null -eq $cfg) { throw "Config parse produced `$null. Check JSON syntax." }
+"{0,-28}: {1}" -f "Parsed .NET type", $cfg.GetType().FullName | Write-Host
+if ($cfg -is [hashtable]) {
+  "{0,-28}: {1}" -f "Top-level keys", (@($cfg.Keys) -join ', ') | Write-Host
+} else {
+  "{0,-28}: {1}" -f "Top-level keys", "<not a dictionary>" | Write-Host
+}
+
+foreach ($req in @('project','tools','pipeline','extract','colmap')) {
+  if (-not $cfg.ContainsKey($req)) { throw "Config missing top-level key: `"$req`"" }
+}
+
+$proj = $cfg['project']
+foreach ($req in @('name','work_dir','video')) {
+  if (-not $proj.ContainsKey($req)) { throw "project.$req missing in config" }
+}
+$projName = $proj['name']
+$workDir  = Initialize-Directory $proj['work_dir']
+$video    = $proj['video']
+$seed     = if ($proj.ContainsKey('seed')) { $proj['seed'] } else { 42 }
+
 if (-not (Test-Path $video)) { throw "Video not found: $video" }
 
-$tools      = $config.tools
-$ffmpeg     = $tools.ffmpeg.path
-$colmap     = $tools.colmap.bat
-$lichtfeldExe = $tools.lichtfeld.exe
-$cudaHome   = $tools.cuda.home
+$tools        = $cfg['tools']
+foreach ($req in @('ffmpeg','colmap','lichtfeld','cuda')) {
+  if (-not $tools.ContainsKey($req)) { throw "tools.$req missing in config" }
+}
+
+$ffmpeg       = $tools['ffmpeg']['path']
+$colmapBat    = $tools['colmap']['bat']
+$lichtfeldExe = $tools['lichtfeld']['exe']
+$cudaHome     = $tools['cuda']['home']
 
 if (-not $ffmpeg) { $ffmpeg = "ffmpeg" }
 if (-not (Get-Command $ffmpeg -ErrorAction SilentlyContinue)) {
   if (-not (Test-Path $ffmpeg)) { throw "ffmpeg not found or not on PATH. Provide tools.ffmpeg.path" }
 }
-
-if (-not (Test-Path $colmap)) { throw "COLMAP .bat not found: $colmap" }
+if (-not (Test-Path $colmapBat)) { throw "COLMAP .bat not found: $colmapBat" }
 if ($lichtfeldExe -and -not (Test-Path $lichtfeldExe)) { throw "LichtFeld executable not found: $lichtfeldExe" }
 if ($cudaHome -and -not (Test-Path $cudaHome)) { throw "CUDA home not found: $cudaHome" }
 
 # Project structure
 $logDir     = Initialize-Directory (Join-Path $workDir "logs")
 $log        = Join-Path $logDir "run-$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-
 $framesDir  = Initialize-Directory (Join-Path $workDir "frames")
 $colmapDir  = Initialize-Directory (Join-Path $workDir "colmap")
 $sparseDir  = Initialize-Directory (Join-Path $colmapDir "sparse")
 $undistDir  = Initialize-Directory (Join-Path $colmapDir "undistorted")
-$dbPath     = Join-Path $colmapDir ($config.colmap.db_name)
+$dbPath     = Join-Path $colmapDir ($cfg['colmap']['db_name'])
 
-$lfTrainDir = Initialize-Directory (Join-Path $workDir (if ($config.lichtfeld.train.work_dir_name) { $config.lichtfeld.train.work_dir_name } else { "lf_train" }))
+$lfWorkDirName = "lf_train"
+if ($cfg.ContainsKey('lichtfeld') -and $cfg['lichtfeld'] -and
+    $cfg['lichtfeld'].ContainsKey('train') -and $cfg['lichtfeld']['train'] -and
+    $cfg['lichtfeld']['train'].ContainsKey('work_dir_name') -and
+    $cfg['lichtfeld']['train']['work_dir_name']) {
+  $lfWorkDirName = $cfg['lichtfeld']['train']['work_dir_name']
+}
+$lfTrainDir = Initialize-Directory (Join-Path $workDir $lfWorkDirName)
+
 $modelDir   = Initialize-Directory (Join-Path $lfTrainDir "model")
 $outDir     = Initialize-Directory (Join-Path $workDir "output")
 $splatPath  = Join-Path $outDir "$($projName)_gaussians.ply"
-
 $nsDataDir  = Initialize-Directory (Join-Path $workDir "ns_data")
 $nsOutDir   = Initialize-Directory (Join-Path $workDir "ns_train")
 
-# Environment for subprocesses
-$env = @{}
+# Subprocess environment
+$procEnv = @{}
 if ($cudaHome) {
-  $env["CUDA_HOME"] = $cudaHome
-  $env["PATH"] = "$cudaHome\bin;$cudaHome\libnvvp;$($env:PATH)"
+  $procEnv["CUDA_HOME"] = $cudaHome
+  $procEnv["PATH"] = "$cudaHome\bin;$cudaHome\libnvvp;$($env:PATH)"
 }
-$env["CUDA_VISIBLE_DEVICES"] = $env:CUDA_VISIBLE_DEVICES  # pass-through if user set it
-$env["PYTHONIOENCODING"] = "utf-8"
-$env["PYTHONUTF8"] = "1"
+if ($env:CUDA_VISIBLE_DEVICES) { $procEnv["CUDA_VISIBLE_DEVICES"] = $env:CUDA_VISIBLE_DEVICES }
+$procEnv["PYTHONIOENCODING"] = "utf-8"
+$procEnv["PYTHONUTF8"] = "1"
 
-# Context for template expansion
+# Paths for template expansion
+$lichtfeldPath = ""
+if ($lichtfeldExe) { $lichtfeldPath = (Resolve-Path $lichtfeldExe).Path }
+
 $ctx = @{
-  project      = $projName
-  work_dir     = $workDir
-  video        = (Resolve-Path $video).Path
-  frames_dir   = $framesDir
-  colmap_dir   = $colmapDir
-  sparse_dir   = $sparseDir
-  undist_dir   = $undistDir
-  db           = $dbPath
-  python       = if ($python) { (Resolve-Path $python).Path } else { "" }
-  colmap_bat   = (Resolve-Path $colmap).Path
-  model_dir    = $modelDir
-  data_dir     = $undistDir  # default: use undistorted images for training
-  ns_data_dir  = $nsDataDir
-  ns_out_dir   = $nsOutDir
-  splat_path   = $splatPath
-  seed         = $config.project.seed
+  project       = $projName
+  work_dir      = $workDir
+  video         = (Resolve-Path $video).Path
+  frames_dir    = $framesDir
+  colmap_dir    = $colmapDir
+  sparse_dir    = $sparseDir
+  undist_dir    = $undistDir
+  db            = $dbPath
+  colmap_bat    = (Resolve-Path $colmapBat).Path
+  lichtfeld_exe = $lichtfeldPath
+  model_dir     = $modelDir
+  data_dir      = $undistDir    # LichtFeld expects undistorted images
+  ns_data_dir   = $nsDataDir
+  ns_out_dir    = $nsOutDir
+  splat_path    = $splatPath
+  seed          = $seed
 }
 
 Write-Section "Config summary"
@@ -308,147 +395,172 @@ $summary = @{
   ColmapDir = $colmapDir
   ModelDir  = $modelDir
   Output    = $splatPath
-  Pipeline  = $config.pipeline
+  Pipeline  = $cfg['pipeline']
 }
-$summary.GetEnumerator() | Sort-Object Name | ForEach-Object { "{0,-10} : {1}" -f $_.Name, $_.Value } | Tee-Object -FilePath $log -Append
+$summary.GetEnumerator() | Sort-Object Name | ForEach-Object { "{0,-10} : {1}" -f $_.Name, $_.Value } | Tee-Object -FilePath $log -Append | Out-Null
 
-# --------------------- Step 1: Extract frames ---------------------
+# ---------- Step 1: Extract frames ----------
 Write-Section "Step 1/4: Extract frames with ffmpeg"
-$imgExt   = $config.extract.image_ext
-$fps      = $config.extract.fps
-$longEdge = $config.extract.resize_long_edge
+$extract  = $cfg['extract']
+$imgExt   = $extract['image_ext']
+$fps      = [int]$extract['fps']
+$longEdge = [int]$extract['resize_long_edge']
 $pattern  = Join-Path $framesDir ("frame_%05d.$imgExt")
 $already  = Get-ChildItem -Path $framesDir -Filter "*.$imgExt" -ErrorAction SilentlyContinue | Measure-Object
-$skip     = $config.extract.skip_if_exists -and ($already.Count -gt 0) -and (-not $Force)
+$skip     = $extract['skip_if_exists'] -and ($already.Count -gt 0) -and (-not $Force)
 
 if ($skip) {
-  Write-Success "Skipping extraction (frames already exist)."
+  Write-OK "Skipping extraction (frames already exist)."
 } else {
-  $vf = "fps=$fps"
+  # Robust Windows-safe filtergraph (no if()): keep aspect ratio, fit within longEdge box
+  $vfParts = @()
+  $vfParts += ('fps={0}' -f $fps)
   if ($longEdge -gt 0) {
-    # scale so that long edge == resize_long_edge, preserve aspect
-    $vf = "$vf,scale='if(gt(iw,ih),$longEdge,-2)':'if(gt(ih,iw),$longEdge,-2)'"
+    $vfParts += ('scale={0}:{0}:force_original_aspect_ratio=decrease' -f $longEdge)
   }
-  $cmd = "`"$ffmpeg`" -y -i `"$($ctx.video)`" -vf $vf `"$pattern`""
-  Invoke-Command $cmd $workDir $env $log | Out-Null
-  Write-Success "Extracted frames -> $framesDir"
+  if ($extract.ContainsKey('transpose') -and $null -ne $extract['transpose'] -and "$($extract['transpose'])" -ne "") {
+    $vfParts += ('transpose={0}' -f $extract['transpose'])
+  }
+  $vf = ($vfParts -join ',')
+
+  # Prefer direct invocation (no cmd), then fallback with cmd.exe (%% escaping for %05d)
+  $ffArgs = @('-y','-i', $ctx['video'], '-vf', $vf, $pattern)
+  $didFallback = $false
+  try {
+    Invoke-Process $ffmpeg $ffArgs $workDir $procEnv $log | Out-Null
+  } catch {
+    Write-Err "ffmpeg failed via direct invocation; retrying through cmd.exe wrapper..."
+    $didFallback = $true
+    $patternCmd = $pattern -replace '%','%%'
+    $cmd = ('{0} -y -i "{1}" -vf "{2}" "{3}"' -f $ffmpeg, $ctx['video'], $vf, $patternCmd)
+    Invoke-External $cmd $workDir $procEnv $log | Out-Null
+  }
+  $suffix = ""
+  if ($didFallback) { $suffix = " (via cmd.exe)" }
+  Write-OK ("Extracted frames -> {0}{1}" -f $framesDir, $suffix)
 }
 
-# --------------------- Step 2: COLMAP ---------------------
-Write-Section "Step 2/4: COLMAP ($($config.colmap.mode))"
-$templates = $config.colmap.templates
-$denseFlag = if ($config.colmap.dense) {1} else {0}
-$cmEnv = $env.Clone()
+# ---------- Step 2: COLMAP ----------
+Write-Section "Step 2/4: COLMAP ($($cfg['colmap']['mode']))"
+$colmapCfg = $cfg['colmap']
+$templates = $colmapCfg['templates']
+$denseFlag = if ($colmapCfg['dense']) {1} else {0}
 
-if ($config.colmap.mode -eq "automatic") {
-  $cmd = Expand-TemplateString $templates.automatic (@{
-    colmap_bat   = $ctx.colmap_bat
-    frames_dir   = $ctx.frames_dir
-    colmap_dir   = $ctx.colmap_dir
-    dense        = $denseFlag
-    single_camera= (ConvertTo-BinaryInt $config.colmap.single_camera)
-  })
-  Invoke-Command $cmd $workDir $cmEnv $log | Out-Null
-  Write-Success "COLMAP automatic reconstruction complete."
+if ($colmapCfg['mode'] -eq "automatic") {
+  $cmd = Expand-TemplateString $templates['automatic'] @{
+    colmap_bat    = $ctx['colmap_bat']
+    frames_dir    = $ctx['frames_dir']
+    colmap_dir    = $ctx['colmap_dir']
+    dense         = $denseFlag
+    single_camera = (ConvertTo-BinaryInt $colmapCfg['single_camera'])
+  }
+  Invoke-External $cmd $workDir $procEnv $log | Out-Null
+  Write-OK "COLMAP automatic reconstruction complete."
+
+  # Ensure undistorted images exist for training (LichtFeld expects undistorted)
+  $undistCmd = Expand-TemplateString $templates['undistort'] @{
+    colmap_bat = $ctx['colmap_bat']; frames_dir = $ctx['frames_dir'];
+    sparse_dir = $ctx['sparse_dir']; undist_dir = $ctx['undist_dir']
+  }
+  Invoke-External $undistCmd $colmapDir $procEnv $log | Out-Null
+  Write-OK "COLMAP undistortion complete -> $undistDir"
 } else {
-  # Manual pipeline
-  $cmd1 = Expand-TemplateString $templates.feature_extractor (@{
-    colmap_bat = $ctx.colmap_bat; db = $ctx.db; frames_dir = $ctx.frames_dir;
-    single_camera = (ConvertTo-BinaryInt $config.colmap.single_camera);
-    sift_threads  = $config.colmap.sift_threads
-  })
-  Invoke-Command $cmd1 $colmapDir $cmEnv $log | Out-Null
+  $cmd1 = Expand-TemplateString $templates['feature_extractor'] @{
+    colmap_bat = $ctx['colmap_bat']; db = $ctx['db']; frames_dir = $ctx['frames_dir'];
+    single_camera = (ConvertTo-BinaryInt $colmapCfg['single_camera']);
+    sift_threads  = $colmapCfg['sift_threads']
+  }
+  Invoke-External $cmd1 $colmapDir $procEnv $log | Out-Null
 
-  $cmd2 = Expand-TemplateString $templates.matcher (@{
-    colmap_bat = $ctx.colmap_bat; db = $ctx.db
-  })
-  Invoke-Command $cmd2 $colmapDir $cmEnv $log | Out-Null
+  $cmd2 = Expand-TemplateString $templates['matcher'] @{
+    colmap_bat = $ctx['colmap_bat']; db = $ctx['db']
+  }
+  Invoke-External $cmd2 $colmapDir $procEnv $log | Out-Null
 
-  $cmd3 = Expand-TemplateString $templates.mapper (@{
-    colmap_bat = $ctx.colmap_bat; db = $ctx.db; frames_dir = $ctx.frames_dir;
-    sparse_dir = $ctx.sparse_dir; mapper_num_threads = $config.colmap.mapper_num_threads
-  })
-  Invoke-Command $cmd3 $colmapDir $cmEnv $log | Out-Null
+  $cmd3 = Expand-TemplateString $templates['mapper'] @{
+    colmap_bat = $ctx['colmap_bat']; db = $ctx['db']; frames_dir = $ctx['frames_dir'];
+    sparse_dir = $ctx['sparse_dir']; mapper_num_threads = $colmapCfg['mapper_num_threads']
+  }
+  Invoke-External $cmd3 $colmapDir $procEnv $log | Out-Null
 
-  $cmd4 = Expand-TemplateString $templates.undistort (@{
-    colmap_bat = $ctx.colmap_bat; frames_dir = $ctx.frames_dir;
-    sparse_dir = $ctx.sparse_dir; undist_dir = $ctx.undist_dir
-  })
-  Invoke-Command $cmd4 $colmapDir $cmEnv $log | Out-Null
+  $cmd4 = Expand-TemplateString $templates['undistort'] @{
+    colmap_bat = $ctx['colmap_bat']; frames_dir = $ctx['frames_dir'];
+    sparse_dir = $ctx['sparse_dir']; undist_dir = $ctx['undist_dir']
+  }
+  Invoke-External $cmd4 $colmapDir $procEnv $log | Out-Null
 
-  Write-Success "COLMAP manual pipeline complete."
+  Write-OK "COLMAP manual pipeline complete."
 }
 
-# --------------------- Step 3: Train ---------------------
+# ---------- Step 3: Train ----------
 Write-Section "Step 3/4: Train"
 
-switch ($config.pipeline) {
+switch ($cfg['pipeline']) {
   'lichtfeld' {
-    $lf = $config.lichtfeld
-    # Merge args with optional args_from_file
-    $trainArgs = $lf.train.args.Clone()
-    $trainArgs = Merge-ArgumentsFromFile $trainArgs $lf.train.args_from_file
-    # Swap {seed} if present
+    if (-not $lichtfeldExe) { throw "tools.lichtfeld.exe not set in config." }
+    $lf = $cfg['lichtfeld']
+
+    $trainArgs = Copy-Hashtable $lf['train']['args']
+    $trainArgs = Merge-ArgumentsFromFile $trainArgs $lf['train']['args_from_file']
     foreach ($k in @($trainArgs.Keys)) {
-      if ("$($trainArgs[$k])" -eq "{seed}") { $trainArgs[$k] = $ctx.seed }
+      if ("$($trainArgs[$k])" -eq "{seed}") { $trainArgs[$k] = $ctx['seed'] }
     }
-    $trainCmd = Expand-TemplateString $lf.train.command $ctx
+
+    $trainCmd = Expand-TemplateString $lf['train']['command'] $ctx
     $trainCmd = "$trainCmd $(ConvertTo-ArgString $trainArgs)"
-    Invoke-Command $trainCmd $lfTrainDir $env $log | Out-Null
-    Write-Success "Training completed (LichtFeld). Model -> $modelDir"
+    Invoke-External $trainCmd $lfTrainDir $procEnv $log | Out-Null
+    Write-OK "Training completed (LichtFeld). Model -> $modelDir"
   }
 
   'nerfstudio' {
-    $ns = $config.nerfstudio
+    $ns = $cfg['nerfstudio']
 
-    # Prepare (ns-process-data)
-    $prepCmd = Expand-TemplateString $ns.prepare.command (@{
-      video = $ctx.video; ns_data_dir = $ctx.ns_data_dir; fps = $fps
-    })
-    if ($ns.prepare.args) { $prepCmd = "$prepCmd $(ConvertTo-ArgString $ns.prepare.args)" }
-    Invoke-Command $prepCmd $workDir $env $log | Out-Null
+    $prepCmd = Expand-TemplateString $ns['prepare']['command'] @{
+      video = $ctx['video']; ns_data_dir = $ctx['ns_data_dir']; fps = $fps
+    }
+    if ($ns['prepare']['args']) { $prepCmd = "$prepCmd $(ConvertTo-ArgString $ns['prepare']['args'])" }
+    Invoke-External $prepCmd $workDir $procEnv $log | Out-Null
 
-    # Train
-    $trainCmd = Expand-TemplateString $ns.train.command (@{
-      ns_data_dir = $ctx.ns_data_dir; ns_out_dir = $ctx.ns_out_dir
-    })
-    if ($ns.train.args) { $trainCmd = "$trainCmd $(ConvertTo-ArgString $ns.train.args)" }
-    Invoke-Command $trainCmd $workDir $env $log | Out-Null
+    $trainCmd = Expand-TemplateString $ns['train']['command'] @{
+      ns_data_dir = $ctx['ns_data_dir']; ns_out_dir = $ctx['ns_out_dir']
+    }
+    if ($ns['train']['args']) { $trainCmd = "$trainCmd $(ConvertTo-ArgString $ns['train']['args'])" }
+    Invoke-External $trainCmd $workDir $procEnv $log | Out-Null
 
-    Write-Success "Training completed (Nerfstudio)."
+    Write-OK "Training completed (Nerfstudio)."
   }
 
-  default { throw "Unknown pipeline: $($config.pipeline)" }
+  default { throw "Unknown pipeline: $($cfg['pipeline'])" }
 }
 
-# --------------------- Step 4: Export splat ---------------------
+# ---------- Step 4: Export splat ----------
 Write-Section "Step 4/4: Export Gaussian Splat"
 
-switch ($config.pipeline) {
+switch ($cfg['pipeline']) {
   'lichtfeld' {
-    $lf = $config.lichtfeld
-    $expArgs = $lf.export.args.Clone()
-    $expArgs = Merge-ArgumentsFromFile $expArgs $lf.export.args_from_file
+    $lf = $cfg['lichtfeld']
+    $expArgs = Copy-Hashtable $lf['export']['args']
+    $expArgs = Merge-ArgumentsFromFile $expArgs $lf['export']['args_from_file']
 
-    $expCmd = Expand-TemplateString $lf.export.command $ctx
+    $expCmd = Expand-TemplateString $lf['export']['command'] $ctx
     $expCmd = "$expCmd $(ConvertTo-ArgString $expArgs)"
-    Invoke-Command $expCmd $workDir $env $log | Out-Null
+    Invoke-External $expCmd $workDir $procEnv $log | Out-Null
 
-    Write-Success "Exported Gaussian splat -> $splatPath"
+    Write-OK "Exported Gaussian splat -> $splatPath"
   }
 
   'nerfstudio' {
-    $ns = $config.nerfstudio
-    $expCmd = Expand-TemplateString $ns.export.command (@{
-      ns_out_dir = $ctx.ns_out_dir; splat_path = $ctx.splat_path
-    })
-    if ($ns.export.args) { $expCmd = "$expCmd $(ConvertTo-ArgString $ns.export.args)" }
-    Invoke-Command $expCmd $workDir $env $log | Out-Null
-    Write-Success "Exported Gaussian splat -> $splatPath"
+    $ns = $cfg['nerfstudio']
+    $expCmd = Expand-TemplateString $ns['export']['command'] @{
+      ns_out_dir = $ctx['ns_out_dir']; splat_path = $ctx['splat_path']
+    }
+    if ($ns['export']['args']) { $expCmd = "$expCmd $(ConvertTo-ArgString $ns['export']['args'])" }
+    Invoke-External $expCmd $workDir $procEnv $log | Out-Null
+    Write-OK "Exported Gaussian splat -> $splatPath"
   }
 }
 
-# --------------------- Result manifest ---------------------
+# ---------- Result manifest ----------
 Write-Section "Done"
 $result = @{
   project   = $projName
@@ -459,9 +571,8 @@ $result = @{
   model_dir = $modelDir
   output    = $splatPath
   log       = $log
-  pipeline  = $config.pipeline
+  pipeline  = $cfg['pipeline']
 }
-$resultJson = ($result | ConvertTo-Json -Depth 5)
-$resultPath = Join-Path $outDir "result.json"
-$resultJson | Set-Content -Encoding UTF8 -LiteralPath $resultPath
-Write-Success "Result manifest: $resultPath"
+$result | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $outDir "result.json")
+Write-OK "Result manifest: $(Join-Path $outDir 'result.json')"
+
