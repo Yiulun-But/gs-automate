@@ -1,0 +1,80 @@
+﻿{
+  "project": {
+    "name": "demo_splat",
+    "work_dir": "D:/GS/work/demo_splat",
+    "video":   "D:/GS/data/input.mp4",
+    "seed": 42
+  },
+
+  "tools": {
+    "ffmpeg": { "path": "ffmpeg" },
+    "colmap": { "bat":  "C:/Program Files/COLMAP/colmap.bat" },
+    "lichtfeld": { "exe": "C:/Program Files/LichtFeld Studio/LichtFeld.exe" },
+    "cuda":   { "home": null }
+  },
+
+  "pipeline": "lichtfeld", 
+
+  "extract": {
+    "fps": 2,
+    "resize_long_edge": 1080,
+    "image_ext": "png",
+    "skip_if_exists": true
+  },
+
+  "colmap": {
+    "mode": "automatic",
+    "db_name": "database.db",
+    "single_camera": true,
+    "sift_threads": 8,
+    "mapper_num_threads": 8,
+    "dense": false,
+
+    "templates": {
+      "automatic": "\"{colmap_bat}\" automatic_reconstructor --workspace_path \"{colmap_dir}\" --image_path \"{frames_dir}\" --dense {dense} --single_camera {single_camera}",
+
+      "feature_extractor": "\"{colmap_bat}\" feature_extractor --database_path \"{db}\" --image_path \"{frames_dir}\" --ImageReader.single_camera {single_camera} --SiftExtraction.num_threads {sift_threads}",
+      "matcher": "\"{colmap_bat}\" exhaustive_matcher --database_path \"{db}\"",
+      "mapper": "\"{colmap_bat}\" mapper --database_path \"{db}\" --image_path \"{frames_dir}\" --output_path \"{sparse_dir}\" --Mapper.num_threads {mapper_num_threads}",
+      "undistort": "\"{colmap_bat}\" image_undistorter --image_path \"{frames_dir}\" --input_path \"{sparse_dir}/0\" --output_path \"{undist_dir}\" --output_type COLMAP"
+    }
+  },
+
+
+  "lichtfeld": {
+    "train": {
+      "work_dir_name": "lf_train",
+      "command": "& \"{lichtfeld_exe}\" train --data \"{data_dir}\" --output \"{model_dir}\"",
+      "args": {
+        "max_iters": 30000,
+        "batch_size": 1,
+        "fp16": true,
+        "random_seed": "{seed}"
+      },
+      "args_from_file": null
+    },
+    "export": {
+      "command": "& \"{lichtfeld_exe}\" export --model \"{model_dir}\" --output \"{splat_path}\"",
+      "args": {
+        "num_points": 1000000,
+        "format": "ply"
+      },
+      "args_from_file": null
+    }
+  },
+
+  "nerfstudio": {
+    "prepare": {
+      "command": "ns-process-data video --data \"{video}\" --output-dir \"{ns_data_dir}\" --fps {fps} --max-frame-processes 8 --keep-extracted-frames --auto-orient",
+      "args": { }
+    },
+    "train": {
+      "command": "ns-train gsplat --data \"{ns_data_dir}\" --output-dir \"{ns_out_dir}\"",
+      "args": { "max-num-iterations": 30000 }
+    },
+    "export": {
+      "command": "ns-export gaussian-splat --load-config \"{ns_out_dir}/outputs/latest/config.yml\" --output \"{splat_path}\"",
+      "args": { "num-points": 1000000 }
+    }
+  }
+}
