@@ -242,9 +242,13 @@ function Invoke-Process([string]$exe, [string[]]$argv, [string]$workdir, [hashta
   $p = New-Object System.Diagnostics.Process
   $p.StartInfo = $psi
   $null = $p.Start()
-  $stdout = $p.StandardOutput.ReadToEnd()
-  $stderr = $p.StandardError.ReadToEnd()
+
+  # Read streams asynchronously to prevent deadlock
+  $outTask = $p.StandardOutput.ReadToEndAsync()
+  $errTask = $p.StandardError.ReadToEndAsync()
   $p.WaitForExit()
+  $stdout = $outTask.Result
+  $stderr = $errTask.Result
 
   if ($ShowOutput) {
     if ($stdout) { Write-Host $stdout }
@@ -279,9 +283,13 @@ function Invoke-External([string]$cmd, [string]$workdir, [hashtable]$env, [strin
   $p = New-Object System.Diagnostics.Process
   $p.StartInfo = $psi
   $null = $p.Start()
-  $stdout = $p.StandardOutput.ReadToEnd()
-  $stderr = $p.StandardError.ReadToEnd()
+
+  # Read streams asynchronously to prevent deadlock
+  $outTask = $p.StandardOutput.ReadToEndAsync()
+  $errTask = $p.StandardError.ReadToEndAsync()
   $p.WaitForExit()
+  $stdout = $outTask.Result
+  $stderr = $errTask.Result
 
   if ($ShowOutput) {
     if ($stdout) { Write-Host $stdout }
