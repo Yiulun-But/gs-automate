@@ -15,6 +15,9 @@
 .PARAMETER Force
   Re-run steps even if outputs exist.
 
+.PARAMETER ShowOutput
+  Display stdout/stderr from COLMAP, LichtFeld, and Nerfstudio in real-time.
+
 .NOTES
   Assumes:
     - CUDA is installed (or specify in tools.cuda.home)
@@ -28,7 +31,8 @@ param(
   [string]$Config,
   [string]$InitConfig,
   [switch]$DryRun,
-  [switch]$Force
+  [switch]$Force,
+  [switch]$ShowOutput
 )
 
 $ErrorActionPreference = 'Stop'
@@ -212,7 +216,7 @@ function Expand-TemplateString([string]$template,[hashtable]$ctx) {
 # --- Process invocation helpers ---
 
 function Quote-Arg([string]$s) {
-  if ($s -match '[\s"]') { return '"' + $s.Replace('"','\"') + '"' }
+  if ($s -match '[\s"]') { return '"' + $s.Replace('"','""') + '"' }
   return $s
 }
 
@@ -241,6 +245,12 @@ function Invoke-Process([string]$exe, [string[]]$argv, [string]$workdir, [hashta
   $stdout = $p.StandardOutput.ReadToEnd()
   $stderr = $p.StandardError.ReadToEnd()
   $p.WaitForExit()
+
+  if ($ShowOutput) {
+    if ($stdout) { Write-Host $stdout }
+    if ($stderr) { Write-Host $stderr -ForegroundColor Yellow }
+  }
+
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
     if ($stderr) { "`n[stderr]`n$stderr`n" | Add-Content -Encoding UTF8 -LiteralPath $logFile }
@@ -272,6 +282,12 @@ function Invoke-External([string]$cmd, [string]$workdir, [hashtable]$env, [strin
   $stdout = $p.StandardOutput.ReadToEnd()
   $stderr = $p.StandardError.ReadToEnd()
   $p.WaitForExit()
+
+  if ($ShowOutput) {
+    if ($stdout) { Write-Host $stdout }
+    if ($stderr) { Write-Host $stderr -ForegroundColor Yellow }
+  }
+
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
     if ($stderr) { "`n[stderr]`n$stderr`n" | Add-Content -Encoding UTF8 -LiteralPath $logFile }
