@@ -113,18 +113,18 @@ function New-ConfigTemplate() {
     "dense": false,
 
     "templates": {
-      "automatic": "& \"{colmap_bat}\" automatic_reconstructor --workspace_path \"{colmap_dir}\" --image_path \"{frames_dir}\" --dense {dense} --single_camera {single_camera}",
-      "feature_extractor": "& \"{colmap_bat}\" feature_extractor --database_path \"{db}\" --image_path \"{frames_dir}\" --ImageReader.single_camera {single_camera} --SiftExtraction.num_threads {sift_threads}",
-      "matcher": "& \"{colmap_bat}\" exhaustive_matcher --database_path \"{db}\"",
-      "mapper": "& \"{colmap_bat}\" mapper --database_path \"{db}\" --image_path \"{frames_dir}\" --output_path \"{sparse_dir}\" --Mapper.num_threads {mapper_num_threads}",
-      "undistort": "& \"{colmap_bat}\" image_undistorter --image_path \"{frames_dir}\" --input_path \"{sparse_dir}/0\" --output_path \"{undist_dir}\" --output_type COLMAP"
+      "automatic": "\"{colmap_bat}\" automatic_reconstructor --workspace_path \"{colmap_dir}\" --image_path \"{frames_dir}\" --dense {dense} --single_camera {single_camera}",
+      "feature_extractor": "\"{colmap_bat}\" feature_extractor --database_path \"{db}\" --image_path \"{frames_dir}\" --ImageReader.single_camera {single_camera} --SiftExtraction.num_threads {sift_threads}",
+      "matcher": "\"{colmap_bat}\" exhaustive_matcher --database_path \"{db}\"",
+      "mapper": "\"{colmap_bat}\" mapper --database_path \"{db}\" --image_path \"{frames_dir}\" --output_path \"{sparse_dir}\" --Mapper.num_threads {mapper_num_threads}",
+      "undistort": "\"{colmap_bat}\" image_undistorter --image_path \"{frames_dir}\" --input_path \"{sparse_dir}/0\" --output_path \"{undist_dir}\" --output_type COLMAP"
     }
   },
 
   "lichtfeld": {
     "train": {
       "work_dir_name": "lf_train",
-      "command": "& \"{lichtfeld_exe}\" train --data \"{data_dir}\" --output \"{model_dir}\"",
+      "command": "\"{lichtfeld_exe}\" train --data \"{data_dir}\" --output \"{model_dir}\"",
       "args": {
         "max_iters": 30000,
         "batch_size": 1,
@@ -134,7 +134,7 @@ function New-ConfigTemplate() {
       "args_from_file": null
     },
     "export": {
-      "command": "& \"{lichtfeld_exe}\" export --model \"{model_dir}\" --output \"{splat_path}\"",
+      "command": "\"{lichtfeld_exe}\" export --model \"{model_dir}\" --output \"{splat_path}\"",
       "args": {
         "num_points": 1000000,
         "format": "ply"
@@ -145,15 +145,15 @@ function New-ConfigTemplate() {
 
   "nerfstudio": {
     "prepare": {
-      "command": "& ns-process-data video --data \"{video}\" --output-dir \"{ns_data_dir}\" --fps {fps} --max-frame-processes 8 --keep-extracted-frames --auto-orient",
+      "command": "ns-process-data video --data \"{video}\" --output-dir \"{ns_data_dir}\" --fps {fps} --max-frame-processes 8 --keep-extracted-frames --auto-orient",
       "args": { }
     },
     "train": {
-      "command": "& ns-train gsplat --data \"{ns_data_dir}\" --output-dir \"{ns_out_dir}\"",
+      "command": "ns-train gsplat --data \"{ns_data_dir}\" --output-dir \"{ns_out_dir}\"",
       "args": { "max-num-iterations": 30000 }
     },
     "export": {
-      "command": "& ns-export gaussian-splat --load-config \"{ns_out_dir}/outputs/latest/config.yml\" --output \"{splat_path}\"",
+      "command": "ns-export gaussian-splat --load-config \"{ns_out_dir}/outputs/latest/config.yml\" --output \"{splat_path}\"",
       "args": { "num-points": 1000000 }
     }
   }
@@ -239,21 +239,41 @@ function Invoke-Process([string]$exe, [string[]]$argv, [string]$workdir, [hashta
   $psi.UseShellExecute = $false
   if ($env) { foreach ($k in $env.Keys) { $psi.Environment[$k] = "$($env[$k])" } }
 
+  # Use StringBuilder to collect output in PS 5.1 compatible way
+  $outBuilder = New-Object System.Text.StringBuilder
+  $errBuilder = New-Object System.Text.StringBuilder
+
   $p = New-Object System.Diagnostics.Process
   $p.StartInfo = $psi
+
+  # Event handlers for async reading (PS 5.1 compatible)
+  $outEvent = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -Action {
+    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
+      $null = $Event.MessageData.AppendLine($EventArgs.Data)
+      if ($ShowOutput) { Write-Host $EventArgs.Data }
+    }
+  } -MessageData $outBuilder
+
+  $errEvent = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -Action {
+    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
+      $null = $Event.MessageData.AppendLine($EventArgs.Data)
+      if ($ShowOutput) { Write-Host $EventArgs.Data -ForegroundColor Yellow }
+    }
+  } -MessageData $errBuilder
+
   $null = $p.Start()
-
-  # Read streams asynchronously to prevent deadlock
-  $outTask = $p.StandardOutput.ReadToEndAsync()
-  $errTask = $p.StandardError.ReadToEndAsync()
+  $p.BeginOutputReadLine()
+  $p.BeginErrorReadLine()
   $p.WaitForExit()
-  $stdout = $outTask.Result
-  $stderr = $errTask.Result
 
-  if ($ShowOutput) {
-    if ($stdout) { Write-Host $stdout }
-    if ($stderr) { Write-Host $stderr -ForegroundColor Yellow }
-  }
+  # Clean up event handlers
+  Unregister-Event -SourceIdentifier $outEvent.Name
+  Unregister-Event -SourceIdentifier $errEvent.Name
+  Remove-Job -Id $outEvent.Id -Force
+  Remove-Job -Id $errEvent.Id -Force
+
+  $stdout = $outBuilder.ToString()
+  $stderr = $errBuilder.ToString()
 
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
@@ -280,21 +300,41 @@ function Invoke-External([string]$cmd, [string]$workdir, [hashtable]$env, [strin
   $psi.UseShellExecute = $false
   if ($env) { foreach ($k in $env.Keys) { $psi.Environment[$k] = "$($env[$k])" } }
 
+  # Use StringBuilder to collect output in PS 5.1 compatible way
+  $outBuilder = New-Object System.Text.StringBuilder
+  $errBuilder = New-Object System.Text.StringBuilder
+
   $p = New-Object System.Diagnostics.Process
   $p.StartInfo = $psi
+
+  # Event handlers for async reading (PS 5.1 compatible)
+  $outEvent = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -Action {
+    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
+      $null = $Event.MessageData.AppendLine($EventArgs.Data)
+      if ($ShowOutput) { Write-Host $EventArgs.Data }
+    }
+  } -MessageData $outBuilder
+
+  $errEvent = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -Action {
+    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
+      $null = $Event.MessageData.AppendLine($EventArgs.Data)
+      if ($ShowOutput) { Write-Host $EventArgs.Data -ForegroundColor Yellow }
+    }
+  } -MessageData $errBuilder
+
   $null = $p.Start()
-
-  # Read streams asynchronously to prevent deadlock
-  $outTask = $p.StandardOutput.ReadToEndAsync()
-  $errTask = $p.StandardError.ReadToEndAsync()
+  $p.BeginOutputReadLine()
+  $p.BeginErrorReadLine()
   $p.WaitForExit()
-  $stdout = $outTask.Result
-  $stderr = $errTask.Result
 
-  if ($ShowOutput) {
-    if ($stdout) { Write-Host $stdout }
-    if ($stderr) { Write-Host $stderr -ForegroundColor Yellow }
-  }
+  # Clean up event handlers
+  Unregister-Event -SourceIdentifier $outEvent.Name
+  Unregister-Event -SourceIdentifier $errEvent.Name
+  Remove-Job -Id $outEvent.Id -Force
+  Remove-Job -Id $errEvent.Id -Force
+
+  $stdout = $outBuilder.ToString()
+  $stderr = $errBuilder.ToString()
 
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
