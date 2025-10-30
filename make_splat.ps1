@@ -243,33 +243,67 @@ function Invoke-Process([string]$exe, [string[]]$argv, [string]$workdir, [hashta
   $p.StartInfo = $psi
   $null = $p.Start()
 
-  # Use async tasks to read both streams without deadlock (PS 5.1 compatible)
-  $outTask = $p.StandardOutput.ReadToEndAsync()
-  $errTask = $p.StandardError.ReadToEndAsync()
-
-  # While waiting, check for output periodically and display in real-time
+  # Create runspaces for real-time output streaming (PS 5.1 compatible)
   $outBuilder = New-Object System.Text.StringBuilder
   $errBuilder = New-Object System.Text.StringBuilder
 
-  while (-not $p.HasExited) {
-    Start-Sleep -Milliseconds 100
-  }
+  # Read stdout in a runspace
+  $rsOut = [runspacefactory]::CreateRunspace()
+  $rsOut.Open()
+  $rsOut.SessionStateProxy.SetVariable('stream', $p.StandardOutput)
+  $rsOut.SessionStateProxy.SetVariable('builder', $outBuilder)
+  $rsOut.SessionStateProxy.SetVariable('showOutput', $ShowOutput)
 
+  $psOut = [powershell]::Create()
+  $psOut.Runspace = $rsOut
+  $null = $psOut.AddScript({
+    while (-not $stream.EndOfStream) {
+      $line = $stream.ReadLine()
+      if ($line) {
+        $null = $builder.AppendLine($line)
+        if ($showOutput) { [Console]::WriteLine($line) }
+      }
+    }
+  })
+  $handleOut = $psOut.BeginInvoke()
+
+  # Read stderr in a runspace
+  $rsErr = [runspacefactory]::CreateRunspace()
+  $rsErr.Open()
+  $rsErr.SessionStateProxy.SetVariable('stream', $p.StandardError)
+  $rsErr.SessionStateProxy.SetVariable('builder', $errBuilder)
+  $rsErr.SessionStateProxy.SetVariable('showOutput', $ShowOutput)
+
+  $psErr = [powershell]::Create()
+  $psErr.Runspace = $rsErr
+  $null = $psErr.AddScript({
+    while (-not $stream.EndOfStream) {
+      $line = $stream.ReadLine()
+      if ($line) {
+        $null = $builder.AppendLine($line)
+        if ($showOutput) {
+          $host.UI.WriteErrorLine($line)
+        }
+      }
+    }
+  })
+  $handleErr = $psErr.BeginInvoke()
+
+  # Wait for process to complete
   $p.WaitForExit()
 
-  # Get the full output
-  $stdout = $outTask.Result
-  $stderr = $errTask.Result
+  # Wait for output streams to finish reading
+  $null = $psOut.EndInvoke($handleOut)
+  $null = $psErr.EndInvoke($handleErr)
 
-  # Display if ShowOutput is enabled
-  if ($ShowOutput) {
-    if ($stdout) {
-      $stdout -split "`n" | ForEach-Object { if ($_) { Write-Host $_ } }
-    }
-    if ($stderr) {
-      $stderr -split "`n" | ForEach-Object { if ($_) { Write-Host $_ -ForegroundColor Yellow } }
-    }
-  }
+  # Cleanup runspaces
+  $psOut.Dispose()
+  $psErr.Dispose()
+  $rsOut.Close()
+  $rsErr.Close()
+
+  $stdout = $outBuilder.ToString()
+  $stderr = $errBuilder.ToString()
 
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
@@ -301,30 +335,67 @@ function Invoke-External([string]$cmd, [string]$workdir, [hashtable]$env, [strin
   $p.StartInfo = $psi
   $null = $p.Start()
 
-  # Use async tasks to read both streams without deadlock (PS 5.1 compatible)
-  $outTask = $p.StandardOutput.ReadToEndAsync()
-  $errTask = $p.StandardError.ReadToEndAsync()
+  # Create runspaces for real-time output streaming (PS 5.1 compatible)
+  $outBuilder = New-Object System.Text.StringBuilder
+  $errBuilder = New-Object System.Text.StringBuilder
 
-  # While waiting, check for output periodically and display in real-time
-  while (-not $p.HasExited) {
-    Start-Sleep -Milliseconds 100
-  }
+  # Read stdout in a runspace
+  $rsOut = [runspacefactory]::CreateRunspace()
+  $rsOut.Open()
+  $rsOut.SessionStateProxy.SetVariable('stream', $p.StandardOutput)
+  $rsOut.SessionStateProxy.SetVariable('builder', $outBuilder)
+  $rsOut.SessionStateProxy.SetVariable('showOutput', $ShowOutput)
 
+  $psOut = [powershell]::Create()
+  $psOut.Runspace = $rsOut
+  $null = $psOut.AddScript({
+    while (-not $stream.EndOfStream) {
+      $line = $stream.ReadLine()
+      if ($line) {
+        $null = $builder.AppendLine($line)
+        if ($showOutput) { [Console]::WriteLine($line) }
+      }
+    }
+  })
+  $handleOut = $psOut.BeginInvoke()
+
+  # Read stderr in a runspace
+  $rsErr = [runspacefactory]::CreateRunspace()
+  $rsErr.Open()
+  $rsErr.SessionStateProxy.SetVariable('stream', $p.StandardError)
+  $rsErr.SessionStateProxy.SetVariable('builder', $errBuilder)
+  $rsErr.SessionStateProxy.SetVariable('showOutput', $ShowOutput)
+
+  $psErr = [powershell]::Create()
+  $psErr.Runspace = $rsErr
+  $null = $psErr.AddScript({
+    while (-not $stream.EndOfStream) {
+      $line = $stream.ReadLine()
+      if ($line) {
+        $null = $builder.AppendLine($line)
+        if ($showOutput) {
+          $host.UI.WriteErrorLine($line)
+        }
+      }
+    }
+  })
+  $handleErr = $psErr.BeginInvoke()
+
+  # Wait for process to complete
   $p.WaitForExit()
 
-  # Get the full output
-  $stdout = $outTask.Result
-  $stderr = $errTask.Result
+  # Wait for output streams to finish reading
+  $null = $psOut.EndInvoke($handleOut)
+  $null = $psErr.EndInvoke($handleErr)
 
-  # Display if ShowOutput is enabled
-  if ($ShowOutput) {
-    if ($stdout) {
-      $stdout -split "`n" | ForEach-Object { if ($_) { Write-Host $_ } }
-    }
-    if ($stderr) {
-      $stderr -split "`n" | ForEach-Object { if ($_) { Write-Host $_ -ForegroundColor Yellow } }
-    }
-  }
+  # Cleanup runspaces
+  $psOut.Dispose()
+  $psErr.Dispose()
+  $rsOut.Close()
+  $rsErr.Close()
+
+  $stdout = $outBuilder.ToString()
+  $stderr = $errBuilder.ToString()
 
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
