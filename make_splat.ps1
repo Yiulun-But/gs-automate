@@ -243,26 +243,22 @@ function Invoke-Process([string]$exe, [string[]]$argv, [string]$workdir, [hashta
   $p.StartInfo = $psi
   $null = $p.Start()
 
-  # Create runspaces for real-time output streaming (PS 5.1 compatible)
-  $outBuilder = New-Object System.Text.StringBuilder
-  $errBuilder = New-Object System.Text.StringBuilder
+  # Create synchronized collections for real-time output (PS 5.1 compatible)
+  $outLines = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+  $errLines = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
 
   # Read stdout in a runspace
   $rsOut = [runspacefactory]::CreateRunspace()
   $rsOut.Open()
   $rsOut.SessionStateProxy.SetVariable('stream', $p.StandardOutput)
-  $rsOut.SessionStateProxy.SetVariable('builder', $outBuilder)
-  $rsOut.SessionStateProxy.SetVariable('showOutput', $ShowOutput)
+  $rsOut.SessionStateProxy.SetVariable('lines', $outLines)
 
   $psOut = [powershell]::Create()
   $psOut.Runspace = $rsOut
   $null = $psOut.AddScript({
     while (-not $stream.EndOfStream) {
       $line = $stream.ReadLine()
-      if ($line) {
-        $null = $builder.AppendLine($line)
-        if ($showOutput) { [Console]::WriteLine($line) }
-      }
+      if ($line) { $null = $lines.Add($line) }
     }
   })
   $handleOut = $psOut.BeginInvoke()
@@ -271,39 +267,59 @@ function Invoke-Process([string]$exe, [string[]]$argv, [string]$workdir, [hashta
   $rsErr = [runspacefactory]::CreateRunspace()
   $rsErr.Open()
   $rsErr.SessionStateProxy.SetVariable('stream', $p.StandardError)
-  $rsErr.SessionStateProxy.SetVariable('builder', $errBuilder)
-  $rsErr.SessionStateProxy.SetVariable('showOutput', $ShowOutput)
+  $rsErr.SessionStateProxy.SetVariable('lines', $errLines)
 
   $psErr = [powershell]::Create()
   $psErr.Runspace = $rsErr
   $null = $psErr.AddScript({
     while (-not $stream.EndOfStream) {
       $line = $stream.ReadLine()
-      if ($line) {
-        $null = $builder.AppendLine($line)
-        if ($showOutput) {
-          $host.UI.WriteErrorLine($line)
-        }
-      }
+      if ($line) { $null = $lines.Add($line) }
     }
   })
   $handleErr = $psErr.BeginInvoke()
 
-  # Wait for process to complete
+  # Monitor output in real-time from main thread
+  $outIdx = 0
+  $errIdx = 0
+  while (-not $p.HasExited -or $outIdx -lt $outLines.Count -or $errIdx -lt $errLines.Count) {
+    # Display new stdout lines
+    while ($outIdx -lt $outLines.Count) {
+      if ($ShowOutput) { Write-Host $outLines[$outIdx] }
+      $outIdx++
+    }
+    # Display new stderr lines
+    while ($errIdx -lt $errLines.Count) {
+      if ($ShowOutput) { Write-Host $errLines[$errIdx] -ForegroundColor Yellow }
+      $errIdx++
+    }
+    if (-not $p.HasExited) { Start-Sleep -Milliseconds 50 }
+  }
+
   $p.WaitForExit()
 
-  # Wait for output streams to finish reading
+  # Wait for runspaces to finish
   $null = $psOut.EndInvoke($handleOut)
   $null = $psErr.EndInvoke($handleErr)
 
-  # Cleanup runspaces
+  # Display any remaining lines
+  while ($outIdx -lt $outLines.Count) {
+    if ($ShowOutput) { Write-Host $outLines[$outIdx] }
+    $outIdx++
+  }
+  while ($errIdx -lt $errLines.Count) {
+    if ($ShowOutput) { Write-Host $errLines[$errIdx] -ForegroundColor Yellow }
+    $errIdx++
+  }
+
+  # Cleanup
   $psOut.Dispose()
   $psErr.Dispose()
   $rsOut.Close()
   $rsErr.Close()
 
-  $stdout = $outBuilder.ToString()
-  $stderr = $errBuilder.ToString()
+  $stdout = ($outLines -join "`n")
+  $stderr = ($errLines -join "`n")
 
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
@@ -335,26 +351,22 @@ function Invoke-External([string]$cmd, [string]$workdir, [hashtable]$env, [strin
   $p.StartInfo = $psi
   $null = $p.Start()
 
-  # Create runspaces for real-time output streaming (PS 5.1 compatible)
-  $outBuilder = New-Object System.Text.StringBuilder
-  $errBuilder = New-Object System.Text.StringBuilder
+  # Create synchronized collections for real-time output (PS 5.1 compatible)
+  $outLines = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+  $errLines = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
 
   # Read stdout in a runspace
   $rsOut = [runspacefactory]::CreateRunspace()
   $rsOut.Open()
   $rsOut.SessionStateProxy.SetVariable('stream', $p.StandardOutput)
-  $rsOut.SessionStateProxy.SetVariable('builder', $outBuilder)
-  $rsOut.SessionStateProxy.SetVariable('showOutput', $ShowOutput)
+  $rsOut.SessionStateProxy.SetVariable('lines', $outLines)
 
   $psOut = [powershell]::Create()
   $psOut.Runspace = $rsOut
   $null = $psOut.AddScript({
     while (-not $stream.EndOfStream) {
       $line = $stream.ReadLine()
-      if ($line) {
-        $null = $builder.AppendLine($line)
-        if ($showOutput) { [Console]::WriteLine($line) }
-      }
+      if ($line) { $null = $lines.Add($line) }
     }
   })
   $handleOut = $psOut.BeginInvoke()
@@ -363,39 +375,59 @@ function Invoke-External([string]$cmd, [string]$workdir, [hashtable]$env, [strin
   $rsErr = [runspacefactory]::CreateRunspace()
   $rsErr.Open()
   $rsErr.SessionStateProxy.SetVariable('stream', $p.StandardError)
-  $rsErr.SessionStateProxy.SetVariable('builder', $errBuilder)
-  $rsErr.SessionStateProxy.SetVariable('showOutput', $ShowOutput)
+  $rsErr.SessionStateProxy.SetVariable('lines', $errLines)
 
   $psErr = [powershell]::Create()
   $psErr.Runspace = $rsErr
   $null = $psErr.AddScript({
     while (-not $stream.EndOfStream) {
       $line = $stream.ReadLine()
-      if ($line) {
-        $null = $builder.AppendLine($line)
-        if ($showOutput) {
-          $host.UI.WriteErrorLine($line)
-        }
-      }
+      if ($line) { $null = $lines.Add($line) }
     }
   })
   $handleErr = $psErr.BeginInvoke()
 
-  # Wait for process to complete
+  # Monitor output in real-time from main thread
+  $outIdx = 0
+  $errIdx = 0
+  while (-not $p.HasExited -or $outIdx -lt $outLines.Count -or $errIdx -lt $errLines.Count) {
+    # Display new stdout lines
+    while ($outIdx -lt $outLines.Count) {
+      if ($ShowOutput) { Write-Host $outLines[$outIdx] }
+      $outIdx++
+    }
+    # Display new stderr lines
+    while ($errIdx -lt $errLines.Count) {
+      if ($ShowOutput) { Write-Host $errLines[$errIdx] -ForegroundColor Yellow }
+      $errIdx++
+    }
+    if (-not $p.HasExited) { Start-Sleep -Milliseconds 50 }
+  }
+
   $p.WaitForExit()
 
-  # Wait for output streams to finish reading
+  # Wait for runspaces to finish
   $null = $psOut.EndInvoke($handleOut)
   $null = $psErr.EndInvoke($handleErr)
 
-  # Cleanup runspaces
+  # Display any remaining lines
+  while ($outIdx -lt $outLines.Count) {
+    if ($ShowOutput) { Write-Host $outLines[$outIdx] }
+    $outIdx++
+  }
+  while ($errIdx -lt $errLines.Count) {
+    if ($ShowOutput) { Write-Host $errLines[$errIdx] -ForegroundColor Yellow }
+    $errIdx++
+  }
+
+  # Cleanup
   $psOut.Dispose()
   $psErr.Dispose()
   $rsOut.Close()
   $rsErr.Close()
 
-  $stdout = $outBuilder.ToString()
-  $stderr = $errBuilder.ToString()
+  $stdout = ($outLines -join "`n")
+  $stderr = ($errLines -join "`n")
 
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
