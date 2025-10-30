@@ -54,6 +54,39 @@ Delete the model directory to force re-training, or use `-Force` flag:
 .\make_splat.ps1 -Config my_config.json -Force
 ```
 
+### LichtFeld Studio Configuration
+
+**✅ FIXED:** The script now uses correct LichtFeld Studio command-line syntax.
+
+**Correct configuration:**
+```json
+"lichtfeld": {
+  "train": {
+    "command": "\"{lichtfeld_exe}\" --data-path \"{data_dir}\" --output-path \"{model_dir}\"",
+    "args": {
+      "iter": 30000,              // Training iterations
+      "resize_factor": 1,         // Image resolution factor
+      "strategy": "mcmc",         // Optimization strategy
+      "max-cap": 1000000,        // Max Gaussians
+      "headless": true           // Run without GUI
+    }
+  }
+}
+```
+
+**Available arguments:**
+- `--iter [NUM]` - Training iterations (default: 30000)
+- `--resize_factor [NUM]` - Image resolution scaling (default: 1)
+- `--strategy [mcmc|default]` - Optimization strategy (default: mcmc)
+- `--max-cap [NUM]` - Maximum Gaussians for MCMC (default: 1000000)
+- `--headless` - Run without GUI (recommended for scripting)
+- `--eval` - Enable evaluation during training
+- `--save-eval-images` - Save evaluation images
+- `--test-every [NUM]` - Test/validation split ratio (default: 8)
+- `--bilateral-grid` - Enable appearance modeling
+
+**Note:** LichtFeld Studio exports .ply files automatically during training. The script will automatically copy the output to the final location.
+
 ### Commands Not Found
 
 **Ensure paths are correctly set in config:**

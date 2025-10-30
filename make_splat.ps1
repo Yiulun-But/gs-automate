@@ -124,21 +124,19 @@ function New-ConfigTemplate() {
   "lichtfeld": {
     "train": {
       "work_dir_name": "lf_train",
-      "command": "\"{lichtfeld_exe}\" train --data \"{data_dir}\" --output \"{model_dir}\"",
+      "command": "\"{lichtfeld_exe}\" --data-path \"{data_dir}\" --output-path \"{model_dir}\"",
       "args": {
-        "max_iters": 30000,
-        "batch_size": 1,
-        "fp16": true,
-        "random_seed": "{seed}"
+        "iter": 30000,
+        "resize_factor": 1,
+        "strategy": "mcmc",
+        "max-cap": 1000000,
+        "headless": true
       },
       "args_from_file": null
     },
     "export": {
-      "command": "\"{lichtfeld_exe}\" export --model \"{model_dir}\" --output \"{splat_path}\"",
-      "args": {
-        "num_points": 1000000,
-        "format": "ply"
-      },
+      "command": "echo LichtFeld exports during training. Check model_dir for .ply files",
+      "args": {},
       "args_from_file": null
     }
   },
@@ -713,15 +711,24 @@ Write-Section "Step 4/4: Export Gaussian Splat"
 
 switch ($cfg['pipeline']) {
   'lichtfeld' {
-    $lf = $cfg['lichtfeld']
-    $expArgs = Copy-Hashtable $lf['export']['args']
-    $expArgs = Merge-ArgumentsFromFile $expArgs $lf['export']['args_from_file']
-
-    $expCmd = Expand-TemplateString $lf['export']['command'] $ctx
-    $expCmd = "$expCmd $(ConvertTo-ArgString $expArgs)"
-    Invoke-External $expCmd $workDir $procEnv $log | Out-Null
-
-    Write-OK "Exported Gaussian splat -> $splatPath"
+    # LichtFeld Studio exports .ply files automatically during training
+    # Look for the output in the model directory
+    $plyFiles = Get-ChildItem -Path $modelDir -Filter "*.ply" -ErrorAction SilentlyContinue
+    if ($plyFiles.Count -gt 0) {
+      # Copy the latest .ply file to the output directory
+      $latestPly = $plyFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+      Copy-Item -Path $latestPly.FullName -Destination $splatPath -Force
+      Write-OK "Exported Gaussian splat -> $splatPath (copied from $($latestPly.Name))"
+    } else {
+      Write-Warning "No .ply files found in $modelDir. LichtFeld may not have completed successfully."
+      # Still run the export command if specified (in case it's a custom command)
+      $lf = $cfg['lichtfeld']
+      $expArgs = Copy-Hashtable $lf['export']['args']
+      $expArgs = Merge-ArgumentsFromFile $expArgs $lf['export']['args_from_file']
+      $expCmd = Expand-TemplateString $lf['export']['command'] $ctx
+      $expCmd = "$expCmd $(ConvertTo-ArgString $expArgs)"
+      Invoke-External $expCmd $workDir $procEnv $log | Out-Null
+    }
   }
 
   'nerfstudio' {
