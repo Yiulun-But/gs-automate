@@ -604,25 +604,33 @@ $colmapCfg = $cfg['colmap']
 $templates = $colmapCfg['templates']
 $denseFlag = if ($colmapCfg['dense']) {1} else {0}
 
-if ($colmapCfg['mode'] -eq "automatic") {
-  $cmd = Expand-TemplateString $templates['automatic'] @{
-    colmap_bat    = $ctx['colmap_bat']
-    frames_dir    = $ctx['frames_dir']
-    colmap_dir    = $ctx['colmap_dir']
-    dense         = $denseFlag
-    single_camera = (ConvertTo-BinaryInt $colmapCfg['single_camera'])
-  }
-  Invoke-External $cmd $workDir $procEnv $log | Out-Null
-  Write-OK "COLMAP automatic reconstruction complete."
+# Check if COLMAP output already exists
+$colmapDone = (Test-Path (Join-Path $undistDir "images")) -and
+              (Test-Path (Join-Path $undistDir "sparse")) -and
+              (Get-ChildItem -Path (Join-Path $undistDir "images") -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
 
-  # Ensure undistorted images exist for training (LichtFeld expects undistorted)
-  $undistCmd = Expand-TemplateString $templates['undistort'] @{
-    colmap_bat = $ctx['colmap_bat']; frames_dir = $ctx['frames_dir'];
-    sparse_dir = $ctx['sparse_dir']; undist_dir = $ctx['undist_dir']
-  }
-  Invoke-External $undistCmd $colmapDir $procEnv $log | Out-Null
-  Write-OK "COLMAP undistortion complete -> $undistDir"
+if ($colmapDone -and -not $Force) {
+  Write-OK "Skipping COLMAP (output already exists: $undistDir). Use -Force to re-run."
 } else {
+  if ($colmapCfg['mode'] -eq "automatic") {
+    $cmd = Expand-TemplateString $templates['automatic'] @{
+      colmap_bat    = $ctx['colmap_bat']
+      frames_dir    = $ctx['frames_dir']
+      colmap_dir    = $ctx['colmap_dir']
+      dense         = $denseFlag
+      single_camera = (ConvertTo-BinaryInt $colmapCfg['single_camera'])
+    }
+    Invoke-External $cmd $workDir $procEnv $log | Out-Null
+    Write-OK "COLMAP automatic reconstruction complete."
+
+    # Ensure undistorted images exist for training (LichtFeld expects undistorted)
+    $undistCmd = Expand-TemplateString $templates['undistort'] @{
+      colmap_bat = $ctx['colmap_bat']; frames_dir = $ctx['frames_dir'];
+      sparse_dir = $ctx['sparse_dir']; undist_dir = $ctx['undist_dir']
+    }
+    Invoke-External $undistCmd $colmapDir $procEnv $log | Out-Null
+    Write-OK "COLMAP undistortion complete -> $undistDir"
+  } else {
   $cmd1 = Expand-TemplateString $templates['feature_extractor'] @{
     colmap_bat = $ctx['colmap_bat']; db = $ctx['db']; frames_dir = $ctx['frames_dir'];
     single_camera = (ConvertTo-BinaryInt $colmapCfg['single_camera']);
@@ -648,27 +656,35 @@ if ($colmapCfg['mode'] -eq "automatic") {
   Invoke-External $cmd4 $colmapDir $procEnv $log | Out-Null
 
   Write-OK "COLMAP manual pipeline complete."
+  }
 }
 
 # ---------- Step 3: Train ----------
 Write-Section "Step 3/4: Train"
 
-switch ($cfg['pipeline']) {
-  'lichtfeld' {
-    if (-not $lichtfeldExe) { throw "tools.lichtfeld.exe not set in config." }
-    $lf = $cfg['lichtfeld']
+# Check if training output already exists
+$trainDone = (Test-Path $modelDir) -and
+             (Get-ChildItem -Path $modelDir -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
 
-    $trainArgs = Copy-Hashtable $lf['train']['args']
-    $trainArgs = Merge-ArgumentsFromFile $trainArgs $lf['train']['args_from_file']
-    foreach ($k in @($trainArgs.Keys)) {
-      if ("$($trainArgs[$k])" -eq "{seed}") { $trainArgs[$k] = $ctx['seed'] }
+if ($trainDone -and -not $Force) {
+  Write-OK "Skipping training (model already exists: $modelDir). Use -Force to re-run."
+} else {
+  switch ($cfg['pipeline']) {
+    'lichtfeld' {
+      if (-not $lichtfeldExe) { throw "tools.lichtfeld.exe not set in config." }
+      $lf = $cfg['lichtfeld']
+
+      $trainArgs = Copy-Hashtable $lf['train']['args']
+      $trainArgs = Merge-ArgumentsFromFile $trainArgs $lf['train']['args_from_file']
+      foreach ($k in @($trainArgs.Keys)) {
+        if ("$($trainArgs[$k])" -eq "{seed}") { $trainArgs[$k] = $ctx['seed'] }
+      }
+
+      $trainCmd = Expand-TemplateString $lf['train']['command'] $ctx
+      $trainCmd = "$trainCmd $(ConvertTo-ArgString $trainArgs)"
+      Invoke-External $trainCmd $lfTrainDir $procEnv $log | Out-Null
+      Write-OK "Training completed (LichtFeld). Model -> $modelDir"
     }
-
-    $trainCmd = Expand-TemplateString $lf['train']['command'] $ctx
-    $trainCmd = "$trainCmd $(ConvertTo-ArgString $trainArgs)"
-    Invoke-External $trainCmd $lfTrainDir $procEnv $log | Out-Null
-    Write-OK "Training completed (LichtFeld). Model -> $modelDir"
-  }
 
   'nerfstudio' {
     $ns = $cfg['nerfstudio']
@@ -689,6 +705,7 @@ switch ($cfg['pipeline']) {
   }
 
   default { throw "Unknown pipeline: $($cfg['pipeline'])" }
+  }
 }
 
 # ---------- Step 4: Export splat ----------
