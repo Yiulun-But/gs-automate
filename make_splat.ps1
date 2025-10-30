@@ -239,43 +239,46 @@ function Invoke-Process([string]$exe, [string[]]$argv, [string]$workdir, [hashta
   $psi.UseShellExecute = $false
   if ($env) { foreach ($k in $env.Keys) { $psi.Environment[$k] = "$($env[$k])" } }
 
-  # Use StringBuilder to collect output in PS 5.1 compatible way
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
+  $null = $p.Start()
+
+  # Read output synchronously line-by-line for real-time display (PS 5.1 compatible)
   $outBuilder = New-Object System.Text.StringBuilder
   $errBuilder = New-Object System.Text.StringBuilder
 
-  $p = New-Object System.Diagnostics.Process
-  $p.StartInfo = $psi
-
-  # Event handlers for async reading (PS 5.1 compatible)
-  $eventData = @{ OutBuilder = $outBuilder; ShowOutput = $ShowOutput }
-  $outEvent = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -Action {
-    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
-      $null = $Event.MessageData.OutBuilder.AppendLine($EventArgs.Data)
-      if ($Event.MessageData.ShowOutput) { Write-Host $EventArgs.Data }
+  # Start background job to read stderr while we read stdout
+  $errJob = Start-Job -ScriptBlock {
+    param($stream, $show)
+    $output = New-Object System.Text.StringBuilder
+    while (-not $stream.EndOfStream) {
+      $line = $stream.ReadLine()
+      if ($line) {
+        $null = $output.AppendLine($line)
+        if ($show) {
+          Write-Host $line -ForegroundColor Yellow
+        }
+      }
     }
-  } -MessageData $eventData
+    return $output.ToString()
+  } -ArgumentList $p.StandardError, $ShowOutput
 
-  $eventData2 = @{ ErrBuilder = $errBuilder; ShowOutput = $ShowOutput }
-  $errEvent = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -Action {
-    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
-      $null = $Event.MessageData.ErrBuilder.AppendLine($EventArgs.Data)
-      if ($Event.MessageData.ShowOutput) { Write-Host $EventArgs.Data -ForegroundColor Yellow }
+  # Read stdout in main thread for real-time display
+  while (-not $p.StandardOutput.EndOfStream) {
+    $line = $p.StandardOutput.ReadLine()
+    if ($line) {
+      $null = $outBuilder.AppendLine($line)
+      if ($ShowOutput) { Write-Host $line }
     }
-  } -MessageData $eventData2
+  }
 
-  $null = $p.Start()
-  $p.BeginOutputReadLine()
-  $p.BeginErrorReadLine()
   $p.WaitForExit()
 
-  # Clean up event handlers
-  Unregister-Event -SourceIdentifier $outEvent.Name
-  Unregister-Event -SourceIdentifier $errEvent.Name
-  Remove-Job -Id $outEvent.Id -Force
-  Remove-Job -Id $errEvent.Id -Force
+  # Collect stderr from background job
+  $stderr = Receive-Job -Job $errJob -Wait
+  Remove-Job -Job $errJob -Force
 
   $stdout = $outBuilder.ToString()
-  $stderr = $errBuilder.ToString()
 
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
@@ -302,43 +305,46 @@ function Invoke-External([string]$cmd, [string]$workdir, [hashtable]$env, [strin
   $psi.UseShellExecute = $false
   if ($env) { foreach ($k in $env.Keys) { $psi.Environment[$k] = "$($env[$k])" } }
 
-  # Use StringBuilder to collect output in PS 5.1 compatible way
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
+  $null = $p.Start()
+
+  # Read output synchronously line-by-line for real-time display (PS 5.1 compatible)
   $outBuilder = New-Object System.Text.StringBuilder
   $errBuilder = New-Object System.Text.StringBuilder
 
-  $p = New-Object System.Diagnostics.Process
-  $p.StartInfo = $psi
-
-  # Event handlers for async reading (PS 5.1 compatible)
-  $eventData = @{ OutBuilder = $outBuilder; ShowOutput = $ShowOutput }
-  $outEvent = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -Action {
-    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
-      $null = $Event.MessageData.OutBuilder.AppendLine($EventArgs.Data)
-      if ($Event.MessageData.ShowOutput) { Write-Host $EventArgs.Data }
+  # Start background job to read stderr while we read stdout
+  $errJob = Start-Job -ScriptBlock {
+    param($stream, $show)
+    $output = New-Object System.Text.StringBuilder
+    while (-not $stream.EndOfStream) {
+      $line = $stream.ReadLine()
+      if ($line) {
+        $null = $output.AppendLine($line)
+        if ($show) {
+          Write-Host $line -ForegroundColor Yellow
+        }
+      }
     }
-  } -MessageData $eventData
+    return $output.ToString()
+  } -ArgumentList $p.StandardError, $ShowOutput
 
-  $eventData2 = @{ ErrBuilder = $errBuilder; ShowOutput = $ShowOutput }
-  $errEvent = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -Action {
-    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
-      $null = $Event.MessageData.ErrBuilder.AppendLine($EventArgs.Data)
-      if ($Event.MessageData.ShowOutput) { Write-Host $EventArgs.Data -ForegroundColor Yellow }
+  # Read stdout in main thread for real-time display
+  while (-not $p.StandardOutput.EndOfStream) {
+    $line = $p.StandardOutput.ReadLine()
+    if ($line) {
+      $null = $outBuilder.AppendLine($line)
+      if ($ShowOutput) { Write-Host $line }
     }
-  } -MessageData $eventData2
+  }
 
-  $null = $p.Start()
-  $p.BeginOutputReadLine()
-  $p.BeginErrorReadLine()
   $p.WaitForExit()
 
-  # Clean up event handlers
-  Unregister-Event -SourceIdentifier $outEvent.Name
-  Unregister-Event -SourceIdentifier $errEvent.Name
-  Remove-Job -Id $outEvent.Id -Force
-  Remove-Job -Id $errEvent.Id -Force
+  # Collect stderr from background job
+  $stderr = Receive-Job -Job $errJob -Wait
+  Remove-Job -Job $errJob -Force
 
   $stdout = $outBuilder.ToString()
-  $stderr = $errBuilder.ToString()
 
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
