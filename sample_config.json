@@ -44,7 +44,7 @@
   "lichtfeld": {
     "train": {
       "work_dir_name": "lf_train",
-      "command": "& \"{lichtfeld_exe}\" train --data \"{data_dir}\" --output \"{model_dir}\"",
+      "command": "\"{lichtfeld_exe}\" train --data \"{data_dir}\" --output \"{model_dir}\"",
       "args": {
         "max_iters": 30000,
         "batch_size": 1,
@@ -54,7 +54,7 @@
       "args_from_file": null
     },
     "export": {
-      "command": "& \"{lichtfeld_exe}\" export --model \"{model_dir}\" --output \"{splat_path}\"",
+      "command": "\"{lichtfeld_exe}\" export --model \"{model_dir}\" --output \"{splat_path}\"",
       "args": {
         "num_points": 1000000,
         "format": "ply"
