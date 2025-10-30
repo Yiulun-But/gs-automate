@@ -243,42 +243,33 @@ function Invoke-Process([string]$exe, [string[]]$argv, [string]$workdir, [hashta
   $p.StartInfo = $psi
   $null = $p.Start()
 
-  # Read output synchronously line-by-line for real-time display (PS 5.1 compatible)
+  # Use async tasks to read both streams without deadlock (PS 5.1 compatible)
+  $outTask = $p.StandardOutput.ReadToEndAsync()
+  $errTask = $p.StandardError.ReadToEndAsync()
+
+  # While waiting, check for output periodically and display in real-time
   $outBuilder = New-Object System.Text.StringBuilder
   $errBuilder = New-Object System.Text.StringBuilder
 
-  # Start background job to read stderr while we read stdout
-  $errJob = Start-Job -ScriptBlock {
-    param($stream, $show)
-    $output = New-Object System.Text.StringBuilder
-    while (-not $stream.EndOfStream) {
-      $line = $stream.ReadLine()
-      if ($line) {
-        $null = $output.AppendLine($line)
-        if ($show) {
-          Write-Host $line -ForegroundColor Yellow
-        }
-      }
-    }
-    return $output.ToString()
-  } -ArgumentList $p.StandardError, $ShowOutput
-
-  # Read stdout in main thread for real-time display
-  while (-not $p.StandardOutput.EndOfStream) {
-    $line = $p.StandardOutput.ReadLine()
-    if ($line) {
-      $null = $outBuilder.AppendLine($line)
-      if ($ShowOutput) { Write-Host $line }
-    }
+  while (-not $p.HasExited) {
+    Start-Sleep -Milliseconds 100
   }
 
   $p.WaitForExit()
 
-  # Collect stderr from background job
-  $stderr = Receive-Job -Job $errJob -Wait
-  Remove-Job -Job $errJob -Force
+  # Get the full output
+  $stdout = $outTask.Result
+  $stderr = $errTask.Result
 
-  $stdout = $outBuilder.ToString()
+  # Display if ShowOutput is enabled
+  if ($ShowOutput) {
+    if ($stdout) {
+      $stdout -split "`n" | ForEach-Object { if ($_) { Write-Host $_ } }
+    }
+    if ($stderr) {
+      $stderr -split "`n" | ForEach-Object { if ($_) { Write-Host $_ -ForegroundColor Yellow } }
+    }
+  }
 
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
@@ -286,6 +277,7 @@ function Invoke-Process([string]$exe, [string[]]$argv, [string]$workdir, [hashta
   }
   if ($p.ExitCode -ne 0) {
     Write-Error "ExitCode=$($p.ExitCode)"
+    if ($stderr) { Write-Error $stderr }
     throw "Invoke-Process failed."
   }
   return $p.ExitCode
@@ -309,42 +301,30 @@ function Invoke-External([string]$cmd, [string]$workdir, [hashtable]$env, [strin
   $p.StartInfo = $psi
   $null = $p.Start()
 
-  # Read output synchronously line-by-line for real-time display (PS 5.1 compatible)
-  $outBuilder = New-Object System.Text.StringBuilder
-  $errBuilder = New-Object System.Text.StringBuilder
+  # Use async tasks to read both streams without deadlock (PS 5.1 compatible)
+  $outTask = $p.StandardOutput.ReadToEndAsync()
+  $errTask = $p.StandardError.ReadToEndAsync()
 
-  # Start background job to read stderr while we read stdout
-  $errJob = Start-Job -ScriptBlock {
-    param($stream, $show)
-    $output = New-Object System.Text.StringBuilder
-    while (-not $stream.EndOfStream) {
-      $line = $stream.ReadLine()
-      if ($line) {
-        $null = $output.AppendLine($line)
-        if ($show) {
-          Write-Host $line -ForegroundColor Yellow
-        }
-      }
-    }
-    return $output.ToString()
-  } -ArgumentList $p.StandardError, $ShowOutput
-
-  # Read stdout in main thread for real-time display
-  while (-not $p.StandardOutput.EndOfStream) {
-    $line = $p.StandardOutput.ReadLine()
-    if ($line) {
-      $null = $outBuilder.AppendLine($line)
-      if ($ShowOutput) { Write-Host $line }
-    }
+  # While waiting, check for output periodically and display in real-time
+  while (-not $p.HasExited) {
+    Start-Sleep -Milliseconds 100
   }
 
   $p.WaitForExit()
 
-  # Collect stderr from background job
-  $stderr = Receive-Job -Job $errJob -Wait
-  Remove-Job -Job $errJob -Force
+  # Get the full output
+  $stdout = $outTask.Result
+  $stderr = $errTask.Result
 
-  $stdout = $outBuilder.ToString()
+  # Display if ShowOutput is enabled
+  if ($ShowOutput) {
+    if ($stdout) {
+      $stdout -split "`n" | ForEach-Object { if ($_) { Write-Host $_ } }
+    }
+    if ($stderr) {
+      $stderr -split "`n" | ForEach-Object { if ($_) { Write-Host $_ -ForegroundColor Yellow } }
+    }
+  }
 
   if ($logFile) {
     $stdout | Add-Content -Encoding UTF8 -LiteralPath $logFile
@@ -352,6 +332,7 @@ function Invoke-External([string]$cmd, [string]$workdir, [hashtable]$env, [strin
   }
   if ($p.ExitCode -ne 0) {
     Write-Error "ExitCode=$($p.ExitCode)"
+    if ($stderr) { Write-Error $stderr }
     throw "Invoke-External failed."
   }
   return $p.ExitCode
