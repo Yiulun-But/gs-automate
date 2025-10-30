@@ -15,13 +15,13 @@ The tool orchestrates a 4-step process:
 
 - **COLMAP** - For 3D reconstruction ([Download](https://colmap.github.io/))
 - **ffmpeg** - For video frame extraction (must be on PATH or specify path in config)
-- **PowerShell 5.1+** (Windows PowerShell or PowerShell Core)
+- **PowerShell 5.1+** (Windows PowerShell - tested and fully compatible with version 5.1)
 - **Training Tool** (choose one):
   - LichtFeld Studio, or
   - Nerfstudio
 
 ### Optional
-- **CUDA** - Recommended for GPU acceleration (specify path in config if not on PATH)
+- **CUDA 12.8+** - Recommended for GPU acceleration (specify path in config if not on PATH)
 - **Python** - Only needed if your training commands require it
 
 ## Quick Start
@@ -40,10 +40,11 @@ Open `my_config.json` and configure:
 
 - **project.video** - Path to your input MP4 file
 - **project.work_dir** - Where to store all outputs
-- **tools.colmap.bat** - Path to colmap.bat
+- **tools.colmap.bat** - Path to colmap.bat (e.g., `C:/Program Files/COLMAP/colmap.bat`)
+- **tools.lichtfeld.exe** - Path to LichtFeld Studio executable (if using LichtFeld)
 - **tools.ffmpeg.path** - Path to ffmpeg (or "ffmpeg" if on PATH)
 - **tools.cuda.home** - CUDA directory (optional, set to null if not needed)
-- **tools.python** - Python path (optional, set to null if not needed)
+- **pipeline** - Set to `"lichtfeld"` or `"nerfstudio"`
 
 ### 3. Run Pipeline
 
@@ -104,7 +105,7 @@ Open `my_config.json` and configure:
 "lichtfeld": {
   "train": {
     "work_dir_name": "lf_train",
-    "command": "lichtfeld-train --data \"{data_dir}\" --output \"{model_dir}\"",
+    "command": "\"{lichtfeld_exe}\" train --data \"{data_dir}\" --output \"{model_dir}\"",
     "args": {
       "max_iters": 30000,
       "batch_size": 1,
@@ -113,7 +114,7 @@ Open `my_config.json` and configure:
     }
   },
   "export": {
-    "command": "lichtfeld-export --model \"{model_dir}\" --output \"{splat_path}\"",
+    "command": "\"{lichtfeld_exe}\" export --model \"{model_dir}\" --output \"{splat_path}\"",
     "args": {
       "num_points": 1000000,
       "format": "ply"
@@ -122,7 +123,10 @@ Open `my_config.json` and configure:
 }
 ```
 
-**Note:** Commands assume `lichtfeld-train` and `lichtfeld-export` are on PATH. You can customize the commands to use Python modules or other executables.
+**Important Notes:**
+- Commands are executed through `cmd.exe`, not PowerShell - do NOT include `&` operator
+- Use `{lichtfeld_exe}` template variable which expands to the path configured in `tools.lichtfeld.exe`
+- Paths with spaces are automatically quoted
 
 #### Nerfstudio Configuration
 
@@ -170,6 +174,13 @@ Re-run all steps even if outputs already exist.
 
 ```powershell
 .\make_splat.ps1 -Config my_config.json -Force
+```
+
+### `-ShowOutput`
+Display real-time stdout/stderr output from COLMAP, LichtFeld, and Nerfstudio commands. Useful for monitoring long-running processes.
+
+```powershell
+.\make_splat.ps1 -Config my_config.json -ShowOutput
 ```
 
 ## Output Structure
@@ -221,9 +232,15 @@ Commands support template variables that are automatically expanded:
 - Ensure Python environment has required packages installed
 - Check `logs/` directory for detailed error messages
 
-### Parser errors (Windows PowerShell)
-- Script requires PowerShell 5.1+
-- Some features work best with PowerShell 7+
+### Commands not executing or hanging
+- Ensure no `&` operator in command templates (only needed for PowerShell, not cmd.exe)
+- Check that paths with spaces are properly quoted
+- Use `-ShowOutput` to see real-time command output for debugging
+
+### Script hangs without output
+- The script uses real-time output streaming with runspaces
+- If the process hangs, check the log file in `work_dir/logs/` for details
+- Some commands may appear to hang while processing (especially COLMAP) - use `-ShowOutput` to monitor progress
 
 ## Example Workflow
 
@@ -252,10 +269,13 @@ You can override COLMAP commands in the config:
 ```json
 "colmap": {
   "templates": {
-    "automatic": "\"{colmap_bat}\" automatic_reconstructor --workspace_path \"{colmap_dir}\" --custom-flag value"
+    "automatic": "\"{colmap_bat}\" automatic_reconstructor --workspace_path \"{colmap_dir}\" --custom-flag value",
+    "feature_extractor": "\"{colmap_bat}\" feature_extractor --database_path \"{db}\" --image_path \"{frames_dir}\"..."
   }
 }
 ```
+
+**Important:** Do NOT include the `&` operator in command templates. Commands are executed through `cmd.exe`, not PowerShell.
 
 ### External Arguments File
 
