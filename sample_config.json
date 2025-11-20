@@ -50,7 +50,10 @@
         "resize_factor": 1,
         "strategy": "mcmc",
         "max-cap": 1000000,
-        "headless": true
+        "headless": true,
+        "eval": false,
+        "save-eval-images": false,
+        "test-every": 8
       },
       "args_from_file": null
     },
