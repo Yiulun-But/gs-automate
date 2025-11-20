@@ -712,6 +712,26 @@ if ($trainDone -and -not $Force) {
       if (-not $lichtfeldExe) { throw "tools.lichtfeld.exe not set in config." }
       $lf = $cfg['lichtfeld']
 
+      # Verify LichtFeld executable exists and try to get version
+      if (-not (Test-Path $lichtfeldExe)) {
+        throw "LichtFeld executable not found at: $lichtfeldExe"
+      }
+
+      Write-Step "Checking LichtFeld Studio..."
+      try {
+        $versionOutput = & $lichtfeldExe --help 2>&1 | Select-Object -First 5
+        if ($versionOutput) {
+          $versionLine = $versionOutput | Where-Object { $_ -match 'version|LichtFeld' } | Select-Object -First 1
+          if ($versionLine) {
+            Write-Step "LichtFeld: $versionLine"
+          } else {
+            Write-Step "LichtFeld executable verified"
+          }
+        }
+      } catch {
+        Write-Warning "Could not verify LichtFeld version: $_"
+      }
+
       $trainArgs = Copy-Hashtable $lf['train']['args']
       $trainArgs = Merge-ArgumentsFromFile $trainArgs $lf['train']['args_from_file']
       foreach ($k in @($trainArgs.Keys)) {
@@ -721,8 +741,40 @@ if ($trainDone -and -not $Force) {
       $trainCmd = Expand-TemplateString $lf['train']['command'] $ctx
       # Use LichtFeld-specific argument aliases for CLI compatibility
       $trainCmd = "$trainCmd $(ConvertTo-ArgString $trainArgs $script:LichtFeldArgAliases)"
-      Invoke-External $trainCmd $lfTrainDir $procEnv $log | Out-Null
-      Write-OK "Training completed (LichtFeld). Model -> $modelDir"
+
+      # Execute training with error handling
+      try {
+        Invoke-External $trainCmd $lfTrainDir $procEnv $log | Out-Null
+      } catch {
+        Write-Err "LichtFeld training failed!"
+        Write-Err "Command: $trainCmd"
+        Write-Err "Check log for details: $log"
+
+        # Check for common issues
+        if ($_.Exception.Message -match 'CUDA|GPU|memory') {
+          Write-Err "Hint: This may be a GPU/CUDA issue. Check CUDA installation and GPU memory."
+        }
+        if ($_.Exception.Message -match 'permission|access') {
+          Write-Err "Hint: This may be a file permission issue. Check write access to output directory."
+        }
+
+        throw "LichtFeld training failed: $_"
+      }
+
+      # Verify training produced output
+      $plyFiles = Get-ChildItem -Path $modelDir -Filter "*.ply" -ErrorAction SilentlyContinue
+      if ($plyFiles.Count -eq 0) {
+        Write-Warning "Training completed but no .ply output found in: $modelDir"
+        Write-Warning "LichtFeld may have encountered an error. Check log: $log"
+
+        # Check for checkpoint files as alternative indicator
+        $ckptFiles = Get-ChildItem -Path $modelDir -Filter "*.ckpt" -ErrorAction SilentlyContinue
+        if ($ckptFiles.Count -gt 0) {
+          Write-Step "Found $($ckptFiles.Count) checkpoint file(s) - training may be incomplete"
+        }
+      } else {
+        Write-OK "Training completed (LichtFeld). Model -> $modelDir ($($plyFiles.Count) .ply file(s))"
+      }
     }
 
   'nerfstudio' {
