@@ -29,12 +29,15 @@
     "sift_threads": 8,
     "mapper_num_threads": 8,
     "dense": false,
+    "matcher_type": "sequential",
 
     "templates": {
       "automatic": "\"{colmap_bat}\" automatic_reconstructor --workspace_path \"{colmap_dir}\" --image_path \"{frames_dir}\" --dense {dense} --single_camera {single_camera}",
 
       "feature_extractor": "\"{colmap_bat}\" feature_extractor --database_path \"{db}\" --image_path \"{frames_dir}\" --ImageReader.single_camera {single_camera} --SiftExtraction.num_threads {sift_threads}",
-      "matcher": "\"{colmap_bat}\" exhaustive_matcher --database_path \"{db}\"",
+      "sequential_matcher": "\"{colmap_bat}\" sequential_matcher --database_path \"{db}\" --SequentialMatching.loop_detection 1",
+      "exhaustive_matcher": "\"{colmap_bat}\" exhaustive_matcher --database_path \"{db}\"",
+      "vocab_tree_matcher": "\"{colmap_bat}\" vocab_tree_matcher --database_path \"{db}\" --VocabTreeMatching.vocab_tree_path \"{vocab_tree_path}\"",
       "mapper": "\"{colmap_bat}\" mapper --database_path \"{db}\" --image_path \"{frames_dir}\" --output_path \"{sparse_dir}\" --Mapper.num_threads {mapper_num_threads}",
       "undistort": "\"{colmap_bat}\" image_undistorter --image_path \"{frames_dir}\" --input_path \"{sparse_dir}/0\" --output_path \"{undist_dir}\" --output_type COLMAP"
     }
