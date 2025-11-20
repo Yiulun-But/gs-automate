@@ -671,6 +671,35 @@ if ($colmapDone -and -not $Force) {
 # ---------- Step 3: Train ----------
 Write-Section "Step 3/4: Train"
 
+# Pre-flight validation: verify COLMAP output before training
+Write-Step "Running pre-flight validation..."
+$colmapImages = Join-Path $undistDir "images"
+$colmapSparse = Join-Path $undistDir "sparse"
+
+if (-not (Test-Path $colmapImages)) {
+  throw "Pre-flight failed: COLMAP undistorted images directory not found at: $colmapImages`nRun COLMAP step first or check for errors in the COLMAP output."
+}
+
+$imageFiles = Get-ChildItem -Path $colmapImages -File -ErrorAction SilentlyContinue
+$imageCount = ($imageFiles | Measure-Object).Count
+if ($imageCount -eq 0) {
+  throw "Pre-flight failed: No images found in COLMAP output directory: $colmapImages`nCOLMAP may have failed to undistort images."
+}
+
+if (-not (Test-Path $colmapSparse)) {
+  throw "Pre-flight failed: COLMAP sparse reconstruction not found at: $colmapSparse`nCOLMAP reconstruction may have failed."
+}
+
+# Check for essential COLMAP files (cameras, images, points)
+$sparseFiles = Get-ChildItem -Path $colmapSparse -File -ErrorAction SilentlyContinue
+$hasCameras = $sparseFiles | Where-Object { $_.Name -match '^cameras\.(bin|txt)$' }
+$hasImages = $sparseFiles | Where-Object { $_.Name -match '^images\.(bin|txt)$' }
+if (-not $hasCameras -or -not $hasImages) {
+  throw "Pre-flight failed: COLMAP sparse reconstruction incomplete.`nMissing cameras or images files in: $colmapSparse"
+}
+
+Write-OK "Pre-flight passed: $imageCount images ready for training"
+
 # Check if training output already exists
 $trainDone = (Test-Path $modelDir) -and
              (Get-ChildItem -Path $modelDir -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
