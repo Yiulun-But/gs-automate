@@ -183,24 +183,57 @@ Display real-time stdout/stderr output from COLMAP, LichtFeld, and Nerfstudio co
 .\make_splat.ps1 -Config my_config.json -ShowOutput
 ```
 
+### `-StartFrom <stage>`
+Start the pipeline from a specific stage, skipping earlier stages. Useful for resuming after failures or re-running specific stages with different settings.
+
+Valid stages: `extract`, `colmap`, `train`, `export`
+
+```powershell
+# Re-run training after adjusting LichtFeld parameters
+.\make_splat.ps1 -Config my_config.json -StartFrom train
+
+# Re-run COLMAP with different settings
+.\make_splat.ps1 -Config my_config.json -StartFrom colmap -Force
+
+# Only export (if you already have a trained model)
+.\make_splat.ps1 -Config my_config.json -StartFrom export
+```
+
+**Note:** The script validates that required outputs from previous stages exist before running. For example, starting from `train` requires that `colmap/undistorted/` exists with images and camera data.
+
 ## Output Structure
 
 After running, your work directory will contain:
 
 ```
 work_dir/
-├── frames/                    # Extracted video frames
-├── colmap/                    # COLMAP reconstruction
-│   ├── sparse/               # Sparse point cloud
-│   └── undistorted/          # Undistorted images + cameras
-├── lf_train/                  # LichtFeld training directory
-│   └── model/                # Trained model checkpoint
-├── output/                    # Final outputs
-│   ├── demo_splat_gaussians.ply  # Final Gaussian splat
+├── frames/                    # Step 1: Extracted video frames (PNG/JPG)
+├── colmap/                    # Step 2: COLMAP reconstruction
+│   ├── database.db           # COLMAP database
+│   ├── sparse/               # Sparse reconstruction
+│   │   └── 0/                # cameras.bin, images.bin, points3D.bin
+│   └── undistorted/          # Undistorted output for training
+│       ├── images/           # Undistorted images
+│       └── sparse/           # Camera parameters (cameras.bin, images.bin)
+├── lf_train/                  # Step 3: LichtFeld training directory
+│   └── model/                # Trained model & checkpoints (.ply files)
+├── output/                    # Step 4: Final outputs
+│   ├── <name>_gaussians.ply  # Final Gaussian splat
 │   └── result.json           # Manifest with all paths
 └── logs/                      # Execution logs
     └── run_20250123_143022.log
 ```
+
+### Directory Dependencies
+
+Each stage requires outputs from the previous stage:
+
+| Stage | Requires | Produces |
+|-------|----------|----------|
+| **extract** | Input video | `frames/` with images |
+| **colmap** | `frames/` | `colmap/undistorted/images/` and `colmap/undistorted/sparse/` |
+| **train** | `colmap/undistorted/` | `lf_train/model/*.ply` |
+| **export** | `lf_train/model/` | `output/<name>_gaussians.ply` |
 
 ## Template Variables
 

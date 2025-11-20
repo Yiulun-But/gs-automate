@@ -18,6 +18,10 @@
 .PARAMETER ShowOutput
   Display stdout/stderr from COLMAP, LichtFeld, and Nerfstudio in real-time.
 
+.PARAMETER StartFrom
+  Start pipeline from a specific stage: extract, colmap, train, or export.
+  Prerequisites from earlier stages must exist. Default is 'extract'.
+
 .NOTES
   Assumes:
     - CUDA is installed (or specify in tools.cuda.home)
@@ -32,7 +36,9 @@ param(
   [string]$InitConfig,
   [switch]$DryRun,
   [switch]$Force,
-  [switch]$ShowOutput
+  [switch]$ShowOutput,
+  [ValidateSet('extract', 'colmap', 'train', 'export')]
+  [string]$StartFrom = 'extract'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -223,6 +229,65 @@ function Expand-TemplateString([string]$template,[hashtable]$ctx) {
     $expanded = $expanded.Replace("{$key}", $val)
   }
   $expanded
+}
+
+# --- Stage management ---
+
+$script:StageOrder = @{
+  'extract' = 1
+  'colmap'  = 2
+  'train'   = 3
+  'export'  = 4
+}
+
+function Test-ShouldRunStage([string]$stage) {
+  $stageNum = $script:StageOrder[$stage]
+  $startNum = $script:StageOrder[$StartFrom]
+  return $stageNum -ge $startNum
+}
+
+function Test-StagePrerequisites([string]$stage, [string]$framesDir, [string]$undistDir, [string]$modelDir) {
+  switch ($stage) {
+    'colmap' {
+      # Requires frames from extract stage
+      if (-not (Test-Path $framesDir)) {
+        throw "Cannot start from 'colmap': frames directory not found at: $framesDir`nRun the 'extract' stage first."
+      }
+      $frameCount = (Get-ChildItem -Path $framesDir -File -ErrorAction SilentlyContinue | Measure-Object).Count
+      if ($frameCount -eq 0) {
+        throw "Cannot start from 'colmap': no frames found in: $framesDir`nRun the 'extract' stage first."
+      }
+      Write-Step "Prerequisite check: Found $frameCount frames in $framesDir"
+    }
+    'train' {
+      # Requires COLMAP undistorted output
+      $colmapImages = Join-Path $undistDir "images"
+      $colmapSparse = Join-Path $undistDir "sparse"
+
+      if (-not (Test-Path $colmapImages)) {
+        throw "Cannot start from 'train': COLMAP undistorted images not found at: $colmapImages`nRun the 'colmap' stage first."
+      }
+      $imageCount = (Get-ChildItem -Path $colmapImages -File -ErrorAction SilentlyContinue | Measure-Object).Count
+      if ($imageCount -eq 0) {
+        throw "Cannot start from 'train': no images in COLMAP output: $colmapImages`nRun the 'colmap' stage first."
+      }
+      if (-not (Test-Path $colmapSparse)) {
+        throw "Cannot start from 'train': COLMAP sparse data not found at: $colmapSparse`nRun the 'colmap' stage first."
+      }
+      Write-Step "Prerequisite check: Found $imageCount undistorted images"
+    }
+    'export' {
+      # Requires trained model
+      if (-not (Test-Path $modelDir)) {
+        throw "Cannot start from 'export': model directory not found at: $modelDir`nRun the 'train' stage first."
+      }
+      $plyFiles = Get-ChildItem -Path $modelDir -Filter "*.ply" -ErrorAction SilentlyContinue
+      if ($plyFiles.Count -eq 0) {
+        throw "Cannot start from 'export': no .ply files found in model directory: $modelDir`nRun the 'train' stage first."
+      }
+      Write-Step "Prerequisite check: Found $($plyFiles.Count) .ply file(s) in model directory"
+    }
+  }
 }
 
 # --- Process invocation helpers ---
@@ -566,150 +631,169 @@ $summary = @{
   ModelDir  = $modelDir
   Output    = $splatPath
   Pipeline  = $cfg['pipeline']
+  StartFrom = $StartFrom
 }
 $summary.GetEnumerator() | Sort-Object Name | ForEach-Object { "{0,-10} : {1}" -f $_.Name, $_.Value } | Tee-Object -FilePath $log -Append | Out-Null
 
+# Validate prerequisites if starting from a later stage
+if ($StartFrom -ne 'extract') {
+  Write-Section "Prerequisite Validation"
+  Test-StagePrerequisites $StartFrom $framesDir $undistDir $modelDir
+  Write-OK "Prerequisites validated for starting from '$StartFrom'"
+}
+
 # ---------- Step 1: Extract frames ----------
-Write-Section "Step 1/4: Extract frames with ffmpeg"
-$extract  = $cfg['extract']
-$imgExt   = $extract['image_ext']
-$fps      = [int]$extract['fps']
-$longEdge = [int]$extract['resize_long_edge']
-$pattern  = Join-Path $framesDir ("frame_%05d.$imgExt")
-$already  = Get-ChildItem -Path $framesDir -Filter "*.$imgExt" -ErrorAction SilentlyContinue | Measure-Object
-$skip     = $extract['skip_if_exists'] -and ($already.Count -gt 0) -and (-not $Force)
+if (Test-ShouldRunStage 'extract') {
+  Write-Section "Step 1/4: Extract frames with ffmpeg"
+  $extract  = $cfg['extract']
+  $imgExt   = $extract['image_ext']
+  $fps      = [int]$extract['fps']
+  $longEdge = [int]$extract['resize_long_edge']
+  $pattern  = Join-Path $framesDir ("frame_%05d.$imgExt")
+  $already  = Get-ChildItem -Path $framesDir -Filter "*.$imgExt" -ErrorAction SilentlyContinue | Measure-Object
+  $skip     = $extract['skip_if_exists'] -and ($already.Count -gt 0) -and (-not $Force)
 
-if ($skip) {
-  Write-OK "Skipping extraction (frames already exist)."
+  if ($skip) {
+    Write-OK "Skipping extraction (frames already exist)."
+  } else {
+    # Robust Windows-safe filtergraph (no if()): keep aspect ratio, fit within longEdge box
+    $vfParts = @()
+    $vfParts += ('fps={0}' -f $fps)
+    if ($longEdge -gt 0) {
+      $vfParts += ('scale={0}:{0}:force_original_aspect_ratio=decrease' -f $longEdge)
+    }
+    if ($extract.ContainsKey('transpose') -and $null -ne $extract['transpose'] -and "$($extract['transpose'])" -ne "") {
+      $vfParts += ('transpose={0}' -f $extract['transpose'])
+    }
+    $vf = ($vfParts -join ',')
+
+    # Prefer direct invocation (no cmd), then fallback with cmd.exe (%% escaping for %05d)
+    $ffArgs = @('-y','-i', $ctx['video'], '-vf', $vf, $pattern)
+    $didFallback = $false
+    try {
+      Invoke-Process $ffmpeg $ffArgs $workDir $procEnv $log | Out-Null
+    } catch {
+      Write-Err "ffmpeg failed via direct invocation; retrying through cmd.exe wrapper..."
+      $didFallback = $true
+      $patternCmd = $pattern -replace '%','%%'
+      $cmd = ('{0} -y -i "{1}" -vf "{2}" "{3}"' -f $ffmpeg, $ctx['video'], $vf, $patternCmd)
+      Invoke-External $cmd $workDir $procEnv $log | Out-Null
+    }
+    $suffix = ""
+    if ($didFallback) { $suffix = " (via cmd.exe)" }
+    Write-OK ("Extracted frames -> {0}{1}" -f $framesDir, $suffix)
+  }
 } else {
-  # Robust Windows-safe filtergraph (no if()): keep aspect ratio, fit within longEdge box
-  $vfParts = @()
-  $vfParts += ('fps={0}' -f $fps)
-  if ($longEdge -gt 0) {
-    $vfParts += ('scale={0}:{0}:force_original_aspect_ratio=decrease' -f $longEdge)
-  }
-  if ($extract.ContainsKey('transpose') -and $null -ne $extract['transpose'] -and "$($extract['transpose'])" -ne "") {
-    $vfParts += ('transpose={0}' -f $extract['transpose'])
-  }
-  $vf = ($vfParts -join ',')
-
-  # Prefer direct invocation (no cmd), then fallback with cmd.exe (%% escaping for %05d)
-  $ffArgs = @('-y','-i', $ctx['video'], '-vf', $vf, $pattern)
-  $didFallback = $false
-  try {
-    Invoke-Process $ffmpeg $ffArgs $workDir $procEnv $log | Out-Null
-  } catch {
-    Write-Err "ffmpeg failed via direct invocation; retrying through cmd.exe wrapper..."
-    $didFallback = $true
-    $patternCmd = $pattern -replace '%','%%'
-    $cmd = ('{0} -y -i "{1}" -vf "{2}" "{3}"' -f $ffmpeg, $ctx['video'], $vf, $patternCmd)
-    Invoke-External $cmd $workDir $procEnv $log | Out-Null
-  }
-  $suffix = ""
-  if ($didFallback) { $suffix = " (via cmd.exe)" }
-  Write-OK ("Extracted frames -> {0}{1}" -f $framesDir, $suffix)
+  Write-Section "Step 1/4: Extract frames with ffmpeg"
+  Write-OK "Skipping (starting from '$StartFrom')"
 }
 
 # ---------- Step 2: COLMAP ----------
-Write-Section "Step 2/4: COLMAP ($($cfg['colmap']['mode']))"
-$colmapCfg = $cfg['colmap']
-$templates = $colmapCfg['templates']
-$denseFlag = if ($colmapCfg['dense']) {1} else {0}
+if (Test-ShouldRunStage 'colmap') {
+  Write-Section "Step 2/4: COLMAP ($($cfg['colmap']['mode']))"
+  $colmapCfg = $cfg['colmap']
+  $templates = $colmapCfg['templates']
+  $denseFlag = if ($colmapCfg['dense']) {1} else {0}
 
-# Check if COLMAP output already exists
-$colmapDone = (Test-Path (Join-Path $undistDir "images")) -and
-              (Test-Path (Join-Path $undistDir "sparse")) -and
-              (Get-ChildItem -Path (Join-Path $undistDir "images") -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+  # Check if COLMAP output already exists
+  $colmapDone = (Test-Path (Join-Path $undistDir "images")) -and
+                (Test-Path (Join-Path $undistDir "sparse")) -and
+                (Get-ChildItem -Path (Join-Path $undistDir "images") -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
 
-if ($colmapDone -and -not $Force) {
-  Write-OK "Skipping COLMAP (output already exists: $undistDir). Use -Force to re-run."
-} else {
-  if ($colmapCfg['mode'] -eq "automatic") {
-    $cmd = Expand-TemplateString $templates['automatic'] @{
-      colmap_bat    = $ctx['colmap_bat']
-      frames_dir    = $ctx['frames_dir']
-      colmap_dir    = $ctx['colmap_dir']
-      dense         = $denseFlag
-      single_camera = (ConvertTo-BinaryInt $colmapCfg['single_camera'])
+  if ($colmapDone -and -not $Force) {
+    Write-OK "Skipping COLMAP (output already exists: $undistDir). Use -Force to re-run."
+  } else {
+    if ($colmapCfg['mode'] -eq "automatic") {
+      $cmd = Expand-TemplateString $templates['automatic'] @{
+        colmap_bat    = $ctx['colmap_bat']
+        frames_dir    = $ctx['frames_dir']
+        colmap_dir    = $ctx['colmap_dir']
+        dense         = $denseFlag
+        single_camera = (ConvertTo-BinaryInt $colmapCfg['single_camera'])
+      }
+      Invoke-External $cmd $workDir $procEnv $log | Out-Null
+      Write-OK "COLMAP automatic reconstruction complete."
+
+      # Ensure undistorted images exist for training (LichtFeld expects undistorted)
+      $undistCmd = Expand-TemplateString $templates['undistort'] @{
+        colmap_bat = $ctx['colmap_bat']; frames_dir = $ctx['frames_dir'];
+        sparse_dir = $ctx['sparse_dir']; undist_dir = $ctx['undist_dir']
+      }
+      Invoke-External $undistCmd $colmapDir $procEnv $log | Out-Null
+      Write-OK "COLMAP undistortion complete -> $undistDir"
+    } else {
+    $cmd1 = Expand-TemplateString $templates['feature_extractor'] @{
+      colmap_bat = $ctx['colmap_bat']; db = $ctx['db']; frames_dir = $ctx['frames_dir'];
+      single_camera = (ConvertTo-BinaryInt $colmapCfg['single_camera']);
+      sift_threads  = $colmapCfg['sift_threads']
     }
-    Invoke-External $cmd $workDir $procEnv $log | Out-Null
-    Write-OK "COLMAP automatic reconstruction complete."
+    Invoke-External $cmd1 $colmapDir $procEnv $log | Out-Null
 
-    # Ensure undistorted images exist for training (LichtFeld expects undistorted)
-    $undistCmd = Expand-TemplateString $templates['undistort'] @{
+    $cmd2 = Expand-TemplateString $templates['matcher'] @{
+      colmap_bat = $ctx['colmap_bat']; db = $ctx['db']
+    }
+    Invoke-External $cmd2 $colmapDir $procEnv $log | Out-Null
+
+    $cmd3 = Expand-TemplateString $templates['mapper'] @{
+      colmap_bat = $ctx['colmap_bat']; db = $ctx['db']; frames_dir = $ctx['frames_dir'];
+      sparse_dir = $ctx['sparse_dir']; mapper_num_threads = $colmapCfg['mapper_num_threads']
+    }
+    Invoke-External $cmd3 $colmapDir $procEnv $log | Out-Null
+
+    $cmd4 = Expand-TemplateString $templates['undistort'] @{
       colmap_bat = $ctx['colmap_bat']; frames_dir = $ctx['frames_dir'];
       sparse_dir = $ctx['sparse_dir']; undist_dir = $ctx['undist_dir']
     }
-    Invoke-External $undistCmd $colmapDir $procEnv $log | Out-Null
-    Write-OK "COLMAP undistortion complete -> $undistDir"
-  } else {
-  $cmd1 = Expand-TemplateString $templates['feature_extractor'] @{
-    colmap_bat = $ctx['colmap_bat']; db = $ctx['db']; frames_dir = $ctx['frames_dir'];
-    single_camera = (ConvertTo-BinaryInt $colmapCfg['single_camera']);
-    sift_threads  = $colmapCfg['sift_threads']
-  }
-  Invoke-External $cmd1 $colmapDir $procEnv $log | Out-Null
+    Invoke-External $cmd4 $colmapDir $procEnv $log | Out-Null
 
-  $cmd2 = Expand-TemplateString $templates['matcher'] @{
-    colmap_bat = $ctx['colmap_bat']; db = $ctx['db']
+    Write-OK "COLMAP manual pipeline complete."
+    }
   }
-  Invoke-External $cmd2 $colmapDir $procEnv $log | Out-Null
-
-  $cmd3 = Expand-TemplateString $templates['mapper'] @{
-    colmap_bat = $ctx['colmap_bat']; db = $ctx['db']; frames_dir = $ctx['frames_dir'];
-    sparse_dir = $ctx['sparse_dir']; mapper_num_threads = $colmapCfg['mapper_num_threads']
-  }
-  Invoke-External $cmd3 $colmapDir $procEnv $log | Out-Null
-
-  $cmd4 = Expand-TemplateString $templates['undistort'] @{
-    colmap_bat = $ctx['colmap_bat']; frames_dir = $ctx['frames_dir'];
-    sparse_dir = $ctx['sparse_dir']; undist_dir = $ctx['undist_dir']
-  }
-  Invoke-External $cmd4 $colmapDir $procEnv $log | Out-Null
-
-  Write-OK "COLMAP manual pipeline complete."
-  }
+} else {
+  Write-Section "Step 2/4: COLMAP"
+  Write-OK "Skipping (starting from '$StartFrom')"
 }
 
 # ---------- Step 3: Train ----------
-Write-Section "Step 3/4: Train"
+if (Test-ShouldRunStage 'train') {
+  Write-Section "Step 3/4: Train"
 
-# Pre-flight validation: verify COLMAP output before training
-Write-Step "Running pre-flight validation..."
-$colmapImages = Join-Path $undistDir "images"
-$colmapSparse = Join-Path $undistDir "sparse"
+  # Pre-flight validation: verify COLMAP output before training
+  Write-Step "Running pre-flight validation..."
+  $colmapImages = Join-Path $undistDir "images"
+  $colmapSparse = Join-Path $undistDir "sparse"
 
-if (-not (Test-Path $colmapImages)) {
-  throw "Pre-flight failed: COLMAP undistorted images directory not found at: $colmapImages`nRun COLMAP step first or check for errors in the COLMAP output."
-}
+  if (-not (Test-Path $colmapImages)) {
+    throw "Pre-flight failed: COLMAP undistorted images directory not found at: $colmapImages`nRun COLMAP step first or check for errors in the COLMAP output."
+  }
 
-$imageFiles = Get-ChildItem -Path $colmapImages -File -ErrorAction SilentlyContinue
-$imageCount = ($imageFiles | Measure-Object).Count
-if ($imageCount -eq 0) {
-  throw "Pre-flight failed: No images found in COLMAP output directory: $colmapImages`nCOLMAP may have failed to undistort images."
-}
+  $imageFiles = Get-ChildItem -Path $colmapImages -File -ErrorAction SilentlyContinue
+  $imageCount = ($imageFiles | Measure-Object).Count
+  if ($imageCount -eq 0) {
+    throw "Pre-flight failed: No images found in COLMAP output directory: $colmapImages`nCOLMAP may have failed to undistort images."
+  }
 
-if (-not (Test-Path $colmapSparse)) {
-  throw "Pre-flight failed: COLMAP sparse reconstruction not found at: $colmapSparse`nCOLMAP reconstruction may have failed."
-}
+  if (-not (Test-Path $colmapSparse)) {
+    throw "Pre-flight failed: COLMAP sparse reconstruction not found at: $colmapSparse`nCOLMAP reconstruction may have failed."
+  }
 
-# Check for essential COLMAP files (cameras, images, points)
-$sparseFiles = Get-ChildItem -Path $colmapSparse -File -ErrorAction SilentlyContinue
-$hasCameras = $sparseFiles | Where-Object { $_.Name -match '^cameras\.(bin|txt)$' }
-$hasImages = $sparseFiles | Where-Object { $_.Name -match '^images\.(bin|txt)$' }
-if (-not $hasCameras -or -not $hasImages) {
-  throw "Pre-flight failed: COLMAP sparse reconstruction incomplete.`nMissing cameras or images files in: $colmapSparse"
-}
+  # Check for essential COLMAP files (cameras, images, points)
+  $sparseFiles = Get-ChildItem -Path $colmapSparse -File -ErrorAction SilentlyContinue
+  $hasCameras = $sparseFiles | Where-Object { $_.Name -match '^cameras\.(bin|txt)$' }
+  $hasImages = $sparseFiles | Where-Object { $_.Name -match '^images\.(bin|txt)$' }
+  if (-not $hasCameras -or -not $hasImages) {
+    throw "Pre-flight failed: COLMAP sparse reconstruction incomplete.`nMissing cameras or images files in: $colmapSparse"
+  }
 
-Write-OK "Pre-flight passed: $imageCount images ready for training"
+  Write-OK "Pre-flight passed: $imageCount images ready for training"
 
-# Check if training output already exists
-$trainDone = (Test-Path $modelDir) -and
-             (Get-ChildItem -Path $modelDir -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+  # Check if training output already exists
+  $trainDone = (Test-Path $modelDir) -and
+               (Get-ChildItem -Path $modelDir -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
 
-if ($trainDone -and -not $Force) {
-  Write-OK "Skipping training (model already exists: $modelDir). Use -Force to re-run."
-} else {
+  if ($trainDone -and -not $Force) {
+    Write-OK "Skipping training (model already exists: $modelDir). Use -Force to re-run."
+  } else {
   switch ($cfg['pipeline']) {
     'lichtfeld' {
       if (-not $lichtfeldExe) { throw "tools.lichtfeld.exe not set in config." }
@@ -800,10 +884,15 @@ if ($trainDone -and -not $Force) {
 
   default { throw "Unknown pipeline: $($cfg['pipeline'])" }
   }
+  }
+} else {
+  Write-Section "Step 3/4: Train"
+  Write-OK "Skipping (starting from '$StartFrom')"
 }
 
 # ---------- Step 4: Export splat ----------
-Write-Section "Step 4/4: Export Gaussian Splat"
+if (Test-ShouldRunStage 'export') {
+  Write-Section "Step 4/4: Export Gaussian Splat"
 
 switch ($cfg['pipeline']) {
   'lichtfeld' {
@@ -836,6 +925,10 @@ switch ($cfg['pipeline']) {
     Invoke-External $expCmd $workDir $procEnv $log | Out-Null
     Write-OK "Exported Gaussian splat -> $splatPath"
   }
+}
+} else {
+  Write-Section "Step 4/4: Export Gaussian Splat"
+  Write-OK "Skipping (starting from '$StartFrom')"
 }
 
 # ---------- Result manifest ----------
