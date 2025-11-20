@@ -124,7 +124,7 @@ function New-ConfigTemplate() {
   "lichtfeld": {
     "train": {
       "work_dir_name": "lf_train",
-      "command": "\"{lichtfeld_exe}\" --data-path \"{data_dir}\" --output-path \"{model_dir}\"",
+      "command": "\"{lichtfeld_exe}\" -d \"{data_dir}\" -o \"{model_dir}\"",
       "args": {
         "iter": 30000,
         "resize_factor": 1,
@@ -176,19 +176,30 @@ function Initialize-Directory($p) {
 function ConvertTo-BinaryInt($b) { if ($b -is [bool]) { if ($b) {1} else {0} } else { $b } }
 function Copy-Hashtable([hashtable]$h) { $n=@{}; if ($h){ foreach ($k in $h.Keys){ $n[$k]=$h[$k] } }; return $n }
 
-function ConvertTo-ArgString([hashtable]$kv) {
+# Argument aliases for LichtFeld Studio CLI (maps config keys to CLI flags)
+$script:LichtFeldArgAliases = @{
+  'iter'          = '-i'
+  'data-path'     = '-d'
+  'output-path'   = '-o'
+  'resize_factor' = '-r'
+}
+
+function ConvertTo-ArgString([hashtable]$kv, [hashtable]$aliases = $null) {
   if (-not $kv) { return "" }
   $parts = @()
   foreach ($k in $kv.Keys) {
     $v = $kv[$k]
+    # Determine the flag to use (alias or default --key format)
+    $flag = if ($aliases -and $aliases.ContainsKey($k)) { $aliases[$k] } else { "--$k" }
+
     if ($v -is [bool]) {
-      if ($v) { $parts += "--$k" }
+      if ($v) { $parts += $flag }
     } elseif ($null -eq $v -or $v -eq "") {
       # skip
     } else {
       $vstr = "$v"
       if ($vstr -match '\s' -or $vstr -match '[\\"]') { $vstr = '"' + $vstr.Replace('"','\"') + '"' }
-      $parts += "--$k $vstr"
+      $parts += "$flag $vstr"
     }
   }
   ($parts -join ' ')
@@ -679,7 +690,8 @@ if ($trainDone -and -not $Force) {
       }
 
       $trainCmd = Expand-TemplateString $lf['train']['command'] $ctx
-      $trainCmd = "$trainCmd $(ConvertTo-ArgString $trainArgs)"
+      # Use LichtFeld-specific argument aliases for CLI compatibility
+      $trainCmd = "$trainCmd $(ConvertTo-ArgString $trainArgs $script:LichtFeldArgAliases)"
       Invoke-External $trainCmd $lfTrainDir $procEnv $log | Out-Null
       Write-OK "Training completed (LichtFeld). Model -> $modelDir"
     }

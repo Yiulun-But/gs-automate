@@ -62,10 +62,10 @@ Delete the model directory to force re-training, or use `-Force` flag:
 ```json
 "lichtfeld": {
   "train": {
-    "command": "\"{lichtfeld_exe}\" --data-path \"{data_dir}\" --output-path \"{model_dir}\"",
+    "command": "\"{lichtfeld_exe}\" -d \"{data_dir}\" -o \"{model_dir}\"",
     "args": {
-      "iter": 30000,              // Training iterations
-      "resize_factor": 1,         // Image resolution factor
+      "iter": 30000,              // Training iterations (uses -i flag)
+      "resize_factor": 1,         // Image resolution factor (uses -r flag)
       "strategy": "mcmc",         // Optimization strategy
       "max-cap": 1000000,        // Max Gaussians
       "headless": true           // Run without GUI
@@ -74,9 +74,17 @@ Delete the model directory to force re-training, or use `-Force` flag:
 }
 ```
 
+**CLI argument mapping:**
+The script automatically maps config keys to LichtFeld CLI flags:
+- `iter` → `-i`
+- `resize_factor` → `-r`
+- Other args use `--key value` format (e.g., `--strategy mcmc`)
+
 **Available arguments:**
-- `--iter [NUM]` - Training iterations (default: 30000)
-- `--resize_factor [NUM]` - Image resolution scaling (default: 1)
+- `-i, --iter [NUM]` - Training iterations (default: 30000)
+- `-r, --resize_factor [NUM]` - Image resolution scaling (default: 1)
+- `-d, --data-path [PATH]` - Path to training data (required, set in command template)
+- `-o, --output-path [PATH]` - Output directory (set in command template)
 - `--strategy [mcmc|default]` - Optimization strategy (default: mcmc)
 - `--max-cap [NUM]` - Maximum Gaussians for MCMC (default: 1000000)
 - `--headless` - Run without GUI (recommended for scripting)

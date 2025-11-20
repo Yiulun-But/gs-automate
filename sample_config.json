@@ -44,7 +44,7 @@
   "lichtfeld": {
     "train": {
       "work_dir_name": "lf_train",
-      "command": "\"{lichtfeld_exe}\" --data-path \"{data_dir}\" --output-path \"{model_dir}\"",
+      "command": "\"{lichtfeld_exe}\" -d \"{data_dir}\" -o \"{model_dir}\"",
       "args": {
         "iter": 30000,
         "resize_factor": 1,
