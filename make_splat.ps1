@@ -44,6 +44,9 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# Start timer for entire process
+$script:StartTime = Get-Date
+
 function Write-Section($t) { Write-Host "`n=== $t ===" -ForegroundColor Cyan }
 function Write-Step($t)    { Write-Host "[*] $t" -ForegroundColor Yellow }
 function Write-OK($t)      { Write-Host "[OK] $t" -ForegroundColor Green }
@@ -936,6 +939,26 @@ switch ($cfg['pipeline']) {
     Write-OK "Exported Gaussian splat -> $splatPath"
   }
 }
+
+# Calculate and display total time
+$script:EndTime = Get-Date
+$script:TotalDuration = $script:EndTime - $script:StartTime
+$hours = [math]::Floor($script:TotalDuration.TotalHours)
+$minutes = $script:TotalDuration.Minutes
+$seconds = $script:TotalDuration.Seconds
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  Total Process Time: " -NoNewline -ForegroundColor Cyan
+if ($hours -gt 0) {
+  Write-Host ("{0}h {1}m {2}s" -f $hours, $minutes, $seconds) -ForegroundColor Green
+} elseif ($minutes -gt 0) {
+  Write-Host ("{0}m {1}s" -f $minutes, $seconds) -ForegroundColor Green
+} else {
+  Write-Host ("{0}s" -f $seconds) -ForegroundColor Green
+}
+Write-Host "========================================" -ForegroundColor Cyan
+
 } else {
   Write-Section "Step 4/4: Export Gaussian Splat"
   Write-OK "Skipping (starting from '$StartFrom')"
